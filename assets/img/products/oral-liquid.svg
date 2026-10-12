@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 400" role="img" aria-label="Sample oral liquid bottle">
+  <defs>
+    <linearGradient id="g" x1="0" x2="1"><stop offset="0" stop-color="#2C5275"/><stop offset=".45" stop-color="#5A90BC"/><stop offset="1" stop-color="#2C5275"/></linearGradient>
+    <linearGradient id="cap" x1="0" x2="1"><stop offset="0" stop-color="#e9eef3"/><stop offset=".5" stop-color="#ffffff"/><stop offset="1" stop-color="#cfd9e3"/></linearGradient>
+  </defs>
+  <ellipse cx="200" cy="362" rx="96" ry="12" fill="#000" opacity=".12"/>
+  <rect x="160" y="40" width="80" height="46" rx="8" fill="url(#cap)"/>
+  <rect x="170" y="84" width="60" height="22" fill="#2C5275"/>
+  <path d="M130 140c0-22 18-36 40-36h60c22 0 40 14 40 36v200c0 12-10 22-22 22H152c-12 0-22-10-22-22z" fill="url(#g)"/>
+  <rect x="140" y="180" width="120" height="130" rx="10" fill="#fff"/>
+  <text x="200" y="215" text-anchor="middle" font-family="Georgia,serif" font-size="20" font-weight="700" fill="#2C5275" letter-spacing="2">FAUNIRA</text>
+  <rect x="160" y="226" width="80" height="2" fill="#487DA7"/>
+  <text x="200" y="252" text-anchor="middle" font-family="Arial,sans-serif" font-size="13" fill="#3A6890">Oral Liquid</text>
+  <text x="200" y="290" text-anchor="middle" font-family="Arial,sans-serif" font-size="11" font-weight="700" fill="#9aaab8" letter-spacing="3">SAMPLE</text>
+  <rect x="146" y="120" width="10" height="210" rx="5" fill="#fff" opacity=".18"/>
+</svg>
