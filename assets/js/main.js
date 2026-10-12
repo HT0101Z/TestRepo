@@ -84,8 +84,9 @@ document.addEventListener('click', (e) => {
     });
   }, { threshold: 0.12, rootMargin: '0px 0px -40px 0px' });
 
-  // Stagger siblings inside the same grid
+  // Stagger siblings inside the same grid; anything already on screen shows at once
   items.forEach((el) => {
+    if (el.getBoundingClientRect().top < window.innerHeight) { el.classList.add('is-in'); return; }
     const siblings = [...el.parentElement.children].filter((c) => c.classList.contains('reveal'));
     el.style.transitionDelay = `${Math.min(siblings.indexOf(el), 5) * 80}ms`;
     io.observe(el);

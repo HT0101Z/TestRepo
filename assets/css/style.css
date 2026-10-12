@@ -44,6 +44,7 @@
 }
 
 [data-theme="dark"] {
+  color-scheme: dark;
   --brand: #6FA3CF;
   --brand-600: #5A90BC;
   --brand-700: #487DA7;
