@@ -1,0 +1,6 @@
+{
+  "appId": "com.snipboard.app",
+  "appName": "SnipBoard",
+  "webDir": "www",
+  "android": { "allowMixedContent": false }
+}

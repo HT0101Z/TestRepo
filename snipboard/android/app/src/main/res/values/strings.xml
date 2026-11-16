@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">SnipBoard</string>
+    <string name="title_activity_main">SnipBoard</string>
+    <string name="package_name">com.snipboard.app</string>
+    <string name="custom_url_scheme">com.snipboard.app</string>
+</resources>

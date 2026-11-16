@@ -1,0 +1,61 @@
+{
+  "name": "snipboard",
+  "version": "1.0.0",
+  "description": "One-click copy board for operations teams",
+  "main": "electron/main.js",
+  "scripts": {
+    "start": "electron .",
+    "test": "node --test tests/core.test.mjs",
+    "test:e2e": "xvfb-run -a node tests/e2e.cjs",
+    "dist:win": "electron-builder --win nsis --x64",
+    "android:sync": "cap sync android",
+    "android:apk": "cap sync android && cd android && ./gradlew assembleDebug"
+  },
+  "author": "SnipBoard",
+  "devDependencies": {
+    "@capacitor/cli": "^6.2.3",
+    "electron": "^33.4.11",
+    "electron-builder": "^25.1.8"
+  },
+  "dependencies": {
+    "@capacitor/android": "^6.2.3",
+    "@capacitor/core": "^6.2.3",
+    "@capacitor/filesystem": "^6.0.4",
+    "@capacitor/share": "^6.0.4",
+    "read-excel-file": "^9.3.17"
+  },
+  "productName": "SnipBoard",
+  "private": true,
+  "build": {
+    "appId": "com.snipboard.app",
+    "productName": "SnipBoard",
+    "files": [
+      "www/**/*",
+      "electron/**/*",
+      "package.json"
+    ],
+    "directories": {
+      "output": "dist"
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "signAndEditExecutable": false
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "shortcutName": "SnipBoard",
+      "artifactName": "SnipBoard-Setup-${version}.exe"
+    },
+    "publish": null
+  }
+}
