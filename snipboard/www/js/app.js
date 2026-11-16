@@ -13,7 +13,26 @@ let data = null;      // { folders, items, settings } - tablet text inside is st
 const plain = new Map();       // tablet id -> readable text (only for tablets that are open)
 const folderKeys = new Map();  // folder id -> { raw, key } for password folders opened this session
 const tabKeys = new Map();     // tablet id -> { salt, key } for password tablets opened this session
-const ui = { view: 'board', folderId: null, search: '', style: 'normal', mini: false };
+const ui = { view: 'board', folderId: null, search: '', folderSearch: '', style: 'normal', mini: false, sort: 'oldest' };
+try { ui.sort = localStorage.getItem('snipboard-sort') || 'oldest'; } catch { /* keep default */ }
+
+const SORTS = [['oldest', 'Oldest first'], ['newest', 'Newest first'], ['az', 'Name A to Z'], ['za', 'Name Z to A']];
+function sorted(list) {
+  const out = list.slice();
+  if (ui.sort === 'newest') out.reverse();
+  else if (ui.sort === 'az' || ui.sort === 'za') {
+    out.sort((a, b) => a.label.localeCompare(b.label, undefined, { sensitivity: 'base', numeric: true }));
+    if (ui.sort === 'za') out.reverse();
+  }
+  return out;
+}
+function sortPicker() {
+  const el = h('select', { id: 'sort', class: 'sortsel', 'aria-label': 'Sort tablets', title: 'Sort tablets',
+    onchange: () => { ui.sort = el.value; try { localStorage.setItem('snipboard-sort', ui.sort); } catch { /* not saved */ } renderContent(); } },
+    SORTS.map(([v, l]) => h('option', { value: v }, 'Sort: ' + l)));
+  el.value = SORTS.some(([v]) => v === ui.sort) ? ui.sort : 'oldest';
+  return el;
+}
 let contentEl = null;
 let copybarEl = null;
 let lastCopy = null;
@@ -222,7 +241,7 @@ function lock(msg) {
   session = null; data = null; lastCopy = null; // a pending clipboard-clear timer keeps running on purpose
   plain.clear(); folderKeys.clear(); tabKeys.clear();
   document.querySelectorAll('dialog').forEach((d) => d.remove());
-  ui.view = 'board'; ui.search = ''; ui.folderId = null;
+  ui.view = 'board'; ui.search = ''; ui.folderSearch = ''; ui.folderId = null;
   render();
   if (msg) toast(msg);
 }
@@ -482,17 +501,6 @@ async function deleteItem(t) {
   if (await change(() => { data.items = data.items.filter((x) => x.id !== t.id); })) renderContent();
 }
 
-async function moveItem(t, dir) {
-  const same = data.items.filter((x) => x.folderId === t.folderId);
-  const other = same[same.indexOf(t) + dir];
-  if (!other) return;
-  const ok = await change(() => {
-    const a = data.items.findIndex((x) => x.id === t.id), b = data.items.findIndex((x) => x.id === other.id);
-    [data.items[a], data.items[b]] = [data.items[b], data.items[a]];
-  });
-  if (ok) renderContent();
-}
-
 // ---------- admin actions on folders ----------
 
 async function newFolder(parentId) {
@@ -556,8 +564,6 @@ function tile(t, showPath) {
       admin && ib('pencil', 'Edit tablet', () => editItem(t)),
       admin && ib('key', selfLocked(t) ? 'Change or remove tablet password' : 'Set a password for this tablet', () => tabletPassword(t)),
       ib('move', 'Move to another folder', () => moveTablet(t)),
-      admin && !showPath && ib('up', 'Move up', () => moveItem(t, -1)),
-      admin && !showPath && ib('down', 'Move down', () => moveItem(t, 1)),
       admin && ib('trash', 'Delete tablet', () => deleteItem(t), 'danger')));
   return el;
 }
@@ -571,20 +577,28 @@ function renderBoard() {
       || (!isHidden(t) && (plain.get(t.id) || '').toLowerCase().includes(q))
       || pathOf(t.folderId).join(' / ').toLowerCase().includes(q));
     return [
-      h('div', { class: 'folderbar' }, h('h2', {}, hits.length + ' result' + (hits.length === 1 ? '' : 's') + ' for "' + ui.search.trim() + '"')),
-      hits.length ? h('div', { class: 'grid' }, hits.map((t) => tile(t, true))) : h('div', { class: 'empty' }, 'Nothing matches. Try a shorter word.'),
+      h('div', { class: 'folderbar' }, h('h2', {}, hits.length + ' result' + (hits.length === 1 ? '' : 's') + ' for "' + ui.search.trim() + '"'), h('span', { class: 'spacer' }), sortPicker()),
+      hits.length ? h('div', { class: 'grid' }, sorted(hits).map((t) => tile(t, true))) : h('div', { class: 'empty' }, 'Nothing matches. Try a shorter word.'),
     ];
   }
   const f = folderById(ui.folderId);
-  const sel = h('select', { 'aria-label': 'Folder', id: 'folder-select', onchange: () => { ui.folderId = sel.value || null; render(); } },
-    [{ value: '', label: 'Home' }, ...flatFolders().map(({ f: x, depth }) => ({ value: x.id, label: '  '.repeat(depth + 1) + (x.lock ? '🔒 ' : '') + x.name }))]
-      .map((o) => h('option', { value: o.value }, o.label)));
-  sel.value = ui.folderId || '';
+  const sel = h('select', { 'aria-label': 'Folder', id: 'folder-select', onchange: () => { ui.folderId = sel.value || null; ui.folderSearch = ''; render(); } });
+  const fillSel = () => {
+    const found = folderMatches();
+    const opts = found
+      ? [{ value: '', label: found.length + ' folder(s) found - choose one' }, ...found.map((x) => ({ value: x.id, label: (x.lock ? '🔒 ' : '') + pathOf(x.id).join(' / ') }))]
+      : [{ value: '', label: 'Home' }, ...flatFolders().map(({ f: x, depth }) => ({ value: x.id, label: '  '.repeat(depth + 1) + (x.lock ? '🔒 ' : '') + x.name }))];
+    sel.replaceChildren(...opts.map((o) => h('option', { value: o.value }, o.label)));
+    sel.value = found ? '' : ui.folderId || '';
+  };
+  fillSel();
+  const fsearch = h('input', { type: 'search', id: 'folder-search-m', placeholder: 'Search folders…', 'aria-label': 'Search folders', value: ui.folderSearch,
+    oninput: () => { ui.folderSearch = fsearch.value; fillSel(); } });
   const title = h('h2', {}, ['Home', ...pathOf(ui.folderId)].join(' / '));
 
   if (f && !accessible(f.id)) {
     return [
-      h('div', { class: 'foldersel' }, sel),
+      h('div', { class: 'foldersel' }, fsearch, sel),
       h('div', { class: 'folderbar' }, title),
       h('div', { class: 'lockpane' }, icon('lock'),
         h('div', {}, 'This folder is protected by a password.'),
@@ -596,10 +610,11 @@ function renderBoard() {
   const items = data.items.filter((t) => t.folderId === ui.folderId);
   const subs = kids(ui.folderId);
   return [
-    h('div', { class: 'foldersel' }, sel),
+    h('div', { class: 'foldersel' }, fsearch, sel),
     h('div', { class: 'folderbar' },
       title,
       h('span', { class: 'spacer' }),
+      sortPicker(),
       admin && tb('plus', 'New tablet', () => editItem(null), 'primary'),
       admin && tb('folderPlus', 'New folder', () => newFolder(ui.folderId)),
       admin && f && ib('tag', 'Rename folder', () => renameFolder(f)),
@@ -608,7 +623,7 @@ function renderBoard() {
       f && f.lock && ib('lock', 'Lock this folder again', () => closeFolder(f)),
       admin && f && ib('trash', 'Delete folder', () => deleteFolder(f), 'danger')),
     subs.length ? h('div', { class: 'subs' }, subs.map((s) => tb(s.lock && !folderKeys.has(s.id) ? 'lock' : 'folder', s.name, () => { ui.folderId = s.id; render(); }))) : null,
-    items.length ? h('div', { class: 'grid' }, items.map((t) => tile(t, false)))
+    items.length ? h('div', { class: 'grid' }, sorted(items).map((t) => tile(t, false)))
       : h('div', { class: 'empty' },
         h('div', {}, admin ? 'No tablets here yet. A tablet holds one piece of text that you can copy with one click.' : 'No tablets in this folder.'),
         admin && tb('plus', 'Create a tablet', () => editItem(null), 'primary')),
@@ -756,7 +771,21 @@ function renderContent() {
   contentEl.replaceChildren(...view.filter(Boolean));
 }
 
+// Folders whose name matches the folder search box (null when the box is empty).
+function folderMatches() {
+  const q = ui.folderSearch.trim().toLowerCase();
+  return q ? flatFolders().map(({ f }) => f).filter((f) => f.name.toLowerCase().includes(q)) : null;
+}
+
 function sideTree() {
+  const found = folderMatches();
+  if (found) {
+    if (!found.length) return [h('div', { class: 'empty small' }, 'No folder has that name.')];
+    return found.map((f) => h('button', { class: 'node found', 'aria-current': ui.folderId === f.id ? 'true' : null,
+      onclick: () => { ui.folderId = f.id; ui.search = ''; ui.folderSearch = ''; ui.view = 'board'; render(); } },
+      icon(f.lock ? (folderKeys.has(f.id) ? 'unlock' : 'lock') : 'folder'),
+      h('span', {}, f.name, h('small', {}, ['Home', ...pathOf(f.parentId)].join(' / ')))));
+  }
   const node = (id, name, depth, ic) => h('button', { class: 'node d' + Math.min(depth, 6), 'aria-current': ui.folderId === id && !ui.search ? 'true' : null,
     onclick: () => { ui.folderId = id; ui.search = ''; ui.view = 'board'; render(); } }, icon(ic), h('span', {}, name));
   return [node(null, 'Home', 0, 'home'),
@@ -768,6 +797,10 @@ function renderMain() {
   const search = h('input', { class: 'search', type: 'search', id: 'search', placeholder: 'Search all tablets…', 'aria-label': 'Search all tablets', value: ui.search,
     oninput: () => { ui.search = search.value; ui.view = 'board'; renderContent(); } });
   const tab = (id, ic, label) => h('button', { class: 'tb', title: label, 'aria-label': label, 'aria-pressed': String(ui.view === id), onclick: () => { ui.view = id; ui.search = ''; render(); } }, icon(ic), h('span', {}, label));
+  const tree = h('div', { class: 'tree' }, sideTree());
+  const fsearch = h('input', { type: 'search', id: 'folder-search', placeholder: 'Search folders…', 'aria-label': 'Search folders', value: ui.folderSearch,
+    oninput: () => { ui.folderSearch = fsearch.value; tree.replaceChildren(...sideTree()); } });
+  const side = h('nav', { class: 'side', 'aria-label': 'Folders' }, fsearch, tree);
   contentEl = h('div', { class: 'main' });
   copybarEl = h('div', { class: 'copybar', 'aria-live': 'polite' });
   root.replaceChildren(...[
@@ -785,7 +818,7 @@ function renderMain() {
       STYLES.map((s) => h('button', { class: 'chip', title: s.sample, 'aria-pressed': String(ui.style === s.id),
         onclick: () => { ui.style = s.id; render(); } }, s.label))),
     h('div', { class: 'body' },
-      ui.view === 'board' ? h('nav', { class: 'side', 'aria-label': 'Folders' }, sideTree()) : null,
+      ui.view === 'board' ? side : null,
       contentEl),
     ui.view !== 'settings' && copybarEl].filter(Boolean));
   renderContent();

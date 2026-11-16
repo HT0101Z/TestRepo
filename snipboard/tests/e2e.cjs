@@ -93,6 +93,18 @@ const fs = require('fs'), os = require('os'), path = require('path');
   assert.equal(await page.locator('.copybar .txt').textContent(), 'ABCDE1234F');
   await shot('1-board');
 
+  // Sorting is chosen outside the tablets; the tablets have no up/down buttons
+  const names = () => page.locator('.tile .name').allTextContents();
+  assert.equal(await page.getByRole('button', { name: /Move (up|down)/ }).count(), 0);
+  assert.deepEqual(await names(), ['Company name', 'Net banking', 'PAN']);
+  await page.getByLabel('Sort tablets').selectOption('newest');
+  assert.deepEqual(await names(), ['PAN', 'Net banking', 'Company name']);
+  await page.getByLabel('Sort tablets').selectOption('za');
+  assert.deepEqual(await names(), ['PAN', 'Net banking', 'Company name']);
+  await page.getByLabel('Sort tablets').selectOption('az');
+  assert.deepEqual(await names(), ['Company name', 'Net banking', 'PAN']);
+  await page.getByLabel('Sort tablets').selectOption('oldest');
+
   // Password folder inside Company, with a tablet in it
   await newFolder('Bank', 'fold1234');
   await page.getByRole('heading', { name: 'Home / Company / Bank' }).waitFor();
@@ -127,6 +139,17 @@ const fs = require('fs'), os = require('os'), path = require('path');
   await tile('Account no').getByRole('button', { name: 'Edit tablet' }).click();
   assert.equal(await dlg().getByLabel('Keep it in folder').count(), 0, 'edit cannot move without password');
   await dlg().getByRole('button', { name: 'Cancel' }).click();
+
+  // Folder search is separate from tablet search
+  const fsearch = page.getByRole('navigation').getByLabel('Search folders');
+  await fsearch.fill('zzz');
+  await page.getByText('No folder has that name.').waitFor();
+  await fsearch.fill('ban');
+  assert.deepEqual(await page.locator('.node').allTextContents(), ['BankHome / Company']);
+  await page.locator('.node', { hasText: 'Bank' }).click();
+  await page.getByRole('heading', { name: 'Home / Company / Bank' }).waitFor();
+  assert.equal(await page.getByRole('navigation').getByLabel('Search folders').inputValue(), '');
+  await nav(/Company/).waitFor();
 
   // Search finds tablets across folders
   await page.getByLabel('Search all tablets').fill('account');
@@ -179,7 +202,8 @@ const fs = require('fs'), os = require('os'), path = require('path');
 
   // Nothing readable on disk
   const raw = fs.readFileSync(path.join(userData, 'snipboard-vault.json'), 'utf8');
-  assert.ok(!/acme|000111222333|GST|Company|p@ss/i.test(raw), 'vault file is encrypted');
+  // Short words can appear by chance in encrypted (base64) data, so look for whole phrases.
+  assert.ok(!/acme INDUSTRIES|000111222333|27ABCDE1234F1Z5|Company name|p@ss/i.test(raw), 'vault file is encrypted');
 
   // Restart as Operator: data persists, read-only, password folder and tablets stay locked
   await app.close();

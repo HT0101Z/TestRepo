@@ -17,7 +17,8 @@ A **tablet** is one unit of information: a name plus the text that gets copied. 
 - **Copy styles**: Normal, BIG (all capital), small, First capital, Each Word, Italic
   (real italic for Word / Outlook / Gmail / Excel) and Italic ✱ (italic-looking letters that paste anywhere).
 - **Text tools** tab to convert any typed or pasted text.
-- **Search** across every folder.
+- **Search** tablets across every folder, plus a separate **folder search** to jump to a folder by name.
+- **Sort** the tablets in view: oldest first, newest first, name A to Z or Z to A.
 - **Two app passwords**: Admin can add, edit, rename and delete. Operator can only view and copy.
 - **Every tablet is encrypted on its own** (AES-256), inside an encrypted data file.
 - **Password on any tablet or folder** (optional). A password tablet is encrypted with that password;
@@ -40,7 +41,7 @@ npm install
 npm start            # run the desktop app
 npm test             # unit tests
 npm run test:e2e     # end-to-end test of the desktop app (Linux, needs xvfb)
-npm run dist:win     # Windows installer -> dist/SnipBoard-Setup-1.2.0.exe
+npm run dist:win     # Windows installer -> dist/SnipBoard-Setup-1.3.0.exe
 npm run android:apk  # Android APK -> android/app/build/outputs/apk/debug/app-debug.apk
 ```
 
