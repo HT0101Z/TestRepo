@@ -104,9 +104,33 @@ const fs = require('fs'), os = require('os'), path = require('path');
   await dlg().getByRole('button', { name: 'Save' }).click();
   await tile('IFSC').getByRole('button', { name: 'Change or remove tablet password' }).waitFor();
 
+  // Moving a tablet between folders needs the Admin password every time
+  await tile('Account no').getByRole('button', { name: 'Move to another folder' }).click();
+  await dlg().getByLabel('Move it to folder').selectOption({ label: 'Home (top level)' });
+  await fill('Admin password', 'oper123');
+  await dlg().getByRole('button', { name: 'Move' }).click();
+  await dlg().getByText('Wrong Admin password.').waitFor();
+  await fill('Admin password', 'admin123');
+  await dlg().getByRole('button', { name: 'Move' }).click();
+  await page.getByText('Moved to Home.').waitFor();
+  assert.equal(await tile('Account no').count(), 0, 'tablet left the folder');
+  await nav(/Home/).click();
+  await tile('Account no').locator('.name').click();
+  await copied('000111222333');
+  await tile('Account no').getByRole('button', { name: 'Move to another folder' }).click();
+  await dlg().getByLabel('Move it to folder').selectOption(await dlg().locator('option', { hasText: 'Bank' }).getAttribute('value'));
+  await fill('Admin password', 'admin123');
+  await dlg().getByRole('button', { name: 'Move' }).click();
+  await page.getByText('Moved to Home / Company / Bank.').waitFor();
+  assert.equal(await dlg().count(), 0);
+  await nav(/Bank/).click();
+  await tile('Account no').getByRole('button', { name: 'Edit tablet' }).click();
+  assert.equal(await dlg().getByLabel('Keep it in folder').count(), 0, 'edit cannot move without password');
+  await dlg().getByRole('button', { name: 'Cancel' }).click();
+
   // Search finds tablets across folders
   await page.getByLabel('Search all tablets').fill('account');
-  await page.getByText('Home / Company / Bank').waitFor();
+  await page.locator('.tile .path', { hasText: 'Home / Company / Bank' }).waitFor();
   await page.getByLabel('Search all tablets').fill('');
 
   // Settings: clipboard clear + CSV import

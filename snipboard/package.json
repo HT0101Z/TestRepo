@@ -1,6 +1,6 @@
 {
   "name": "snipboard",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "One-click copy board for operations teams",
   "main": "electron/main.js",
   "scripts": {

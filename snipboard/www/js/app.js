@@ -430,7 +430,7 @@ async function editItem(t) {
     fields: [
       { name: 'label', label: 'Tablet name', value: t ? t.label : '' },
       { name: 'value', label: 'Text saved in this tablet (this is what gets copied)', type: 'textarea', value: t ? plain.get(t.id) : '' },
-      { name: 'folderId', label: 'Keep it in folder', type: 'select', value: (t ? t.folderId : ui.folderId) || '', options: folderOptions() },
+      isNew && { name: 'folderId', label: 'Keep it in folder', type: 'select', value: ui.folderId || '', options: folderOptions() },
       { name: 'sensitive', label: 'Hide the text on screen and clear it from the clipboard after copying', type: 'checkbox', value: t ? t.sensitive : false },
       isNew && { name: 'p1', label: 'Tablet password (optional)', type: 'password', hint: 'Leave empty for no password. With a password, the text can only be copied after typing it.' },
       isNew && { name: 'p2', label: 'Repeat tablet password', type: 'password' },
@@ -442,12 +442,31 @@ async function editItem(t) {
   const ok = await change(async () => {
     const item = t || { id: uid() };
     if (isNew) data.items.push(item);
-    Object.assign(item, { label: vals.label.trim(), folderId: vals.folderId || null, sensitive: vals.sensitive });
+    Object.assign(item, { label: vals.label.trim(), sensitive: vals.sensitive });
+    if (isNew) item.folderId = vals.folderId || null;
     plain.set(item.id, vals.value);
     if (isNew && vals.p1) { tabKeys.set(item.id, await V.passwordKey(vals.p1, null, file.iter)); item.enc = { by: 'self' }; }
     await sealItem(item);
   });
   if (ok) { renderContent(); toast(isNew ? 'Tablet saved.' : 'Changes saved.'); }
+}
+
+// Moving a tablet to another folder always needs the Admin password, whoever is logged in.
+async function moveTablet(t) {
+  const vals = await form({ title: 'Move tablet "' + t.label + '"', ok: 'Move',
+    text: 'Moving a tablet needs the Admin password every time.',
+    fields: [
+      { name: 'folderId', label: 'Move it to folder', type: 'select', value: t.folderId || '', options: folderOptions() },
+      { name: 'pw', label: 'Admin password', type: 'password' },
+    ],
+    validate: async (v) => {
+      if ((v.folderId || null) === t.folderId) return 'Choose a different folder.';
+      const res = await V.unlock(file, v.pw);
+      return res && res.role === 'admin' ? '' : 'Wrong Admin password.';
+    } });
+  if (!vals) return;
+  const ok = await change(() => { data.items.find((x) => x.id === t.id).folderId = vals.folderId || null; });
+  if (ok) { renderContent(); toast('Moved to ' + ['Home', ...pathOf(vals.folderId || null)].join(' / ') + '.'); }
 }
 
 async function renameItem(t) {
@@ -536,6 +555,7 @@ function tile(t, showPath) {
       admin && ib('tag', 'Rename tablet', () => renameItem(t)),
       admin && ib('pencil', 'Edit tablet', () => editItem(t)),
       admin && ib('key', selfLocked(t) ? 'Change or remove tablet password' : 'Set a password for this tablet', () => tabletPassword(t)),
+      ib('move', 'Move to another folder', () => moveTablet(t)),
       admin && !showPath && ib('up', 'Move up', () => moveItem(t, -1)),
       admin && !showPath && ib('down', 'Move down', () => moveItem(t, 1)),
       admin && ib('trash', 'Delete tablet', () => deleteItem(t), 'danger')));

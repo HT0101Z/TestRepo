@@ -13,6 +13,7 @@ A **tablet** is one unit of information: a name plus the text that gets copied. 
 - **One-click copy** of any tablet, pasted wherever you need it. A bar at the bottom always shows
   what was copied last.
 - **Folders inside folders** to keep tablets arranged; rename, move and delete folders and tablets.
+  Moving a tablet to another folder asks for the Admin password every time.
 - **Copy styles**: Normal, BIG (all capital), small, First capital, Each Word, Italic
   (real italic for Word / Outlook / Gmail / Excel) and Italic ✱ (italic-looking letters that paste anywhere).
 - **Text tools** tab to convert any typed or pasted text.
@@ -39,7 +40,7 @@ npm install
 npm start            # run the desktop app
 npm test             # unit tests
 npm run test:e2e     # end-to-end test of the desktop app (Linux, needs xvfb)
-npm run dist:win     # Windows installer -> dist/SnipBoard-Setup-1.1.0.exe
+npm run dist:win     # Windows installer -> dist/SnipBoard-Setup-1.2.0.exe
 npm run android:apk  # Android APK -> android/app/build/outputs/apk/debug/app-debug.apk
 ```
 
