@@ -72,7 +72,6 @@ label.check input { width: auto; }
 .tile .path { font-size: 12px; color: var(--muted); }
 .tile .hit .value { color: var(--muted); margin-top: 2px; white-space: pre-wrap; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
 .tile .acts { display: flex; gap: 2px; flex-wrap: wrap; border-top: 1px solid var(--line); padding: 5px 8px; }
-.tile .acts button { font-size: 12px; padding: 2px 7px; }
 .empty { text-align: center; color: var(--muted); padding: 40px 10px; }
 
 .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; margin-bottom: 14px; max-width: 760px; }
@@ -88,9 +87,36 @@ dialog .btns { display: flex; justify-content: flex-end; gap: 8px; margin-top: 1
 .menu button { display: block; width: 100%; text-align: left; border: 0; margin: 2px 0; }
 .menu button small { color: var(--muted); margin-left: 6px; }
 
-#toast { position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%); background: #1c2330; color: #fff; padding: 8px 16px; border-radius: 99px; opacity: 0; pointer-events: none; transition: opacity .15s; max-width: calc(100% - 24px); text-align: center; z-index: 10; }
+#toast { position: fixed; left: 50%; bottom: 70px; transform: translateX(-50%); background: #1c2330; color: #fff; padding: 8px 16px; border-radius: 99px; opacity: 0; pointer-events: none; transition: opacity .15s; max-width: calc(100% - 24px); text-align: center; z-index: 10; }
 #toast.show { opacity: .96; }
 @media (prefers-reduced-motion: reduce) { #toast { transition: none; } }
+
+/* Icons and icon buttons */
+.ic { width: 18px; height: 18px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.ib { display: inline-flex; align-items: center; justify-content: center; padding: 6px; min-width: 34px; min-height: 34px; }
+.ib[aria-pressed="true"] { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
+.tb { display: inline-flex; align-items: center; gap: 6px; }
+.tile .acts .ib { border-color: transparent; background: transparent; min-width: 30px; min-height: 30px; padding: 4px; color: var(--muted); }
+.tile .acts .ib:hover { color: var(--text); background: var(--bg); }
+.tile .acts .ib.danger, .ib.danger, .tb.danger { color: var(--danger); }
+.tile .hit .name { display: flex; align-items: center; gap: 6px; }
+.tile .hit .name .ic { width: 15px; height: 15px; color: var(--accent); }
+.node { display: flex; align-items: center; gap: 7px; }
+.node span { overflow: hidden; text-overflow: ellipsis; }
+.node .ic { width: 16px; height: 16px; }
+.node.d1 { padding-left: 22px; } .node.d2 { padding-left: 36px; } .node.d3 { padding-left: 50px; }
+.node.d4 { padding-left: 64px; } .node.d5 { padding-left: 78px; } .node.d6 { padding-left: 92px; }
+.hint { font-size: 12px; color: var(--muted); margin-top: 3px; }
+.empty .tb { margin-top: 14px; }
+.lockpane { display: flex; flex-direction: column; align-items: center; gap: 12px; padding: 40px 10px; color: var(--muted); text-align: center; }
+.lockpane > .ic { width: 40px; height: 40px; }
+
+/* What was copied last */
+.copybar { display: flex; align-items: center; gap: 10px; padding: 8px 14px; background: var(--panel); border-top: 1px solid var(--line); min-height: 52px; }
+.copybar > .ic { color: var(--ok); }
+.copybar .what { flex: 1; min-width: 0; }
+.copybar .lbl { font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.copybar .txt { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 /* Phone and the always-on-top mini window */
 @media (max-width: 640px) {
@@ -100,7 +126,8 @@ dialog .btns { display: flex; justify-content: flex-end; gap: 8px; margin-top: 1
   .main { padding: 10px; }
   .top { padding: 8px 10px; }
   .brand { display: none; }
-  .top button, .folderbar button { padding: 4px 9px; }
+  .tabs .tb span { display: none; }
+  .tabs .tb { padding: 7px 10px; }
   .folderbar h2 { flex-basis: 100%; }
   .folderbar .spacer { display: none; }
   .tile .hit .value { -webkit-line-clamp: 1; }

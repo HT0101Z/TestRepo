@@ -45,3 +45,19 @@ test('csv round trip and row mapping', () => {
   const r = io.rowsToRecords([['Folder', 'Name', 'Value'], ['A > B', 'n', 42], ['', '', ''], ['A', '', 'x']]);
   assert.deepEqual(r, { records: [{ path: ['A', 'B'], label: 'n', value: '42', sensitive: false }], skipped: 1 });
 });
+
+test('tablet and folder passwords', async () => {
+  const k = await v.passwordKey('tab-pw', null, 1000);
+  const box = await v.encText(k.key, 'secret text');
+  assert.ok(!JSON.stringify(box).includes('secret'));
+  assert.equal(await v.decText((await v.passwordKey('tab-pw', k.salt, 1000)).key, box), 'secret text');
+  await assert.rejects(async () => v.decText((await v.passwordKey('wrong', k.salt, 1000)).key, box));
+
+  const f = await v.newFolderLock('folder-pw', 1000);
+  const fbox = await v.encText(f.key, 'in folder');
+  assert.equal(await v.openFolderLock(f.lock, 'nope', 1000), null);
+  const opened = await v.openFolderLock(f.lock, 'folder-pw', 1000);
+  assert.equal(await v.decText(opened.key, fbox), 'in folder');
+  const relocked = await v.relockFolder(opened.raw, 'new-pw', 1000);
+  assert.equal(await v.decText((await v.openFolderLock(relocked, 'new-pw', 1000)).key, fbox), 'in folder');
+});

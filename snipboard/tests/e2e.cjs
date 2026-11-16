@@ -1,4 +1,4 @@
-// End-to-end check of the real Electron app. Run with: npm run test:e2e
+// End-to-end check of the real desktop app. Run with: npm run test:e2e
 const { _electron: electron } = require('playwright');
 const assert = require('node:assert/strict');
 const fs = require('fs'), os = require('os'), path = require('path');
@@ -13,150 +13,221 @@ const fs = require('fs'), os = require('os'), path = require('path');
   const watch = (p) => { p.on('pageerror', (e) => errors.push(String(e))); p.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); }); };
   watch(page);
   const clip = () => app.evaluate(({ clipboard }) => ({ text: clipboard.readText(), html: clipboard.readHTML() }));
-  const fill = async (label, value) => page.locator('dialog').getByLabel(label).fill(value);
+  const dlg = () => page.locator('dialog');
+  const fill = (label, value) => dlg().getByLabel(label, { exact: true }).fill(value);
+  const btn = (name) => page.getByRole('button', { name, exact: true });
+  const nav = (name) => page.getByRole('navigation').getByRole('button', { name });
+  const tile = (name) => page.locator('.tile').filter({ has: page.locator('.name', { hasText: new RegExp('^' + name + '$') }) });
   const shot = async (name) => { if (shots) await page.screenshot({ path: path.join(shots, name + '.png') }); };
+  const TEXT = 'Text saved in this tablet (this is what gets copied)';
+  const newTablet = async (name, text, opts = {}) => {
+    await btn('New tablet').click();
+    await fill('Tablet name', name);
+    await fill(TEXT, text);
+    if (opts.hide) await dlg().getByLabel(/Hide the text/).check();
+    if (opts.pw) { await fill('Tablet password (optional)', opts.pw); await fill('Repeat tablet password', opts.pw); }
+    if (opts.shot) await shot(opts.shot);
+    await dlg().getByRole('button', { name: 'Save' }).click();
+    await tile(name).waitFor();
+  };
+  const newFolder = async (name, pw) => {
+    await btn('New folder').click();
+    await fill('Folder name', name);
+    if (pw) { await fill('Folder password (optional)', pw); await fill('Repeat folder password', pw); }
+    await dlg().getByRole('button', { name: 'Create folder' }).click();
+    await page.getByRole('heading', { name: new RegExp(name + '$') }).waitFor();
+  };
+  const copied = async (want) => { await page.waitForTimeout(150); assert.equal((await clip()).text, want); };
 
   // First-run setup
   await page.getByLabel('Admin password (can add, edit and delete)').fill('admin123');
   await page.getByLabel('Repeat Admin password').fill('admin123');
   await page.getByLabel('Operator password (can only view and copy)').fill('admin123');
   await page.getByLabel('Repeat Operator password').fill('admin123');
-  await page.getByRole('button', { name: 'Create and open' }).click();
+  await btn('Create and open').click();
   await page.getByText('must be different').waitFor();
   await page.getByLabel('Operator password (can only view and copy)').fill('oper123');
   await page.getByLabel('Repeat Operator password').fill('oper123');
-  await page.getByRole('button', { name: 'Create and open' }).click();
+  await btn('Create and open').click();
   await page.getByText('Admin', { exact: true }).waitFor();
+  await page.getByText('Nothing copied yet').waitFor();
 
-  // Folders and items
-  await page.getByRole('button', { name: '+ Folder' }).click();
-  await fill('Folder name', 'Company');
-  await page.getByRole('button', { name: 'Create' }).click();
-  await page.getByRole('button', { name: '+ Subfolder' }).click();
-  await fill('Folder name', 'Bank');
-  await page.getByRole('button', { name: 'Create' }).click();
-  await page.getByRole('heading', { name: 'Home / Company / Bank' }).waitFor();
-  await page.getByRole('button', { name: '+ New item' }).click();
-  await fill('Name (shown on the button)', 'Account no');
-  await fill('Text to copy', '000111222333');
-  await page.locator('dialog').getByLabel(/Sensitive/).check();
-  await page.getByRole('button', { name: 'Save' }).click();
-  await page.getByText('••••••••').waitFor();
-  assert.equal(await page.getByText('000111222333').count(), 0, 'sensitive value hidden');
-
-  await page.getByRole('navigation').getByRole('button', { name: /Company/ }).click();
-  await page.getByRole('button', { name: '+ New item' }).click();
-  await fill('Name (shown on the button)', 'Compny');
-  await fill('Text to copy', 'acme INDUSTRIES pvt ltd');
-  await page.getByRole('button', { name: 'Save' }).click();
-  await page.getByRole('button', { name: 'Rename', exact: true }).click();
+  // Folders and tablets
+  await newFolder('Company');
+  await newTablet('Compny', 'acme INDUSTRIES pvt ltd', { shot: '2-new-tablet' });
+  await btn('Rename tablet').click();
   await fill('New name', 'Company name');
-  await page.locator('dialog').getByRole('button', { name: 'Rename' }).click();
-  const tile = page.locator('.tile', { hasText: 'Company name' });
-  await tile.waitFor();
+  await dlg().getByRole('button', { name: 'Rename' }).click();
+  await tile('Company name').waitFor();
 
-  // One-click copy in each style
+  // One-click copy in each style, and the "last copied" bar shows what was copied
   const expect = { Normal: 'acme INDUSTRIES pvt ltd', BIG: 'ACME INDUSTRIES PVT LTD', small: 'acme industries pvt ltd',
     'First capital': 'Acme industries pvt ltd', 'Each Word': 'Acme Industries Pvt Ltd' };
   for (const [chip, want] of Object.entries(expect)) {
     await page.locator('.stylebar').getByRole('button', { name: chip, exact: true }).click();
-    await page.locator('.tile', { hasText: 'Company name' }).locator('.name').click();
-    await page.waitForTimeout(150);
-    assert.equal((await clip()).text, want, chip);
+    await tile('Company name').locator('.name').click();
+    await copied(want);
+    assert.equal(await page.locator('.copybar .txt').textContent(), want, 'copy bar shows ' + chip);
   }
   await page.locator('.stylebar').getByRole('button', { name: 'Italic', exact: true }).click();
-  await page.locator('.tile .name').click(); await page.waitForTimeout(150);
+  await tile('Company name').locator('.name').click(); await page.waitForTimeout(150);
   let c = await clip();
   assert.equal(c.text, 'acme INDUSTRIES pvt ltd');
   assert.match(c.html, /<i>acme INDUSTRIES pvt ltd<\/i>/);
   await page.locator('.stylebar').getByRole('button', { name: 'Italic ✱' }).click();
-  await page.locator('.tile .name').click(); await page.waitForTimeout(150);
+  await tile('Company name').locator('.name').click(); await page.waitForTimeout(150);
   assert.ok((await clip()).text.startsWith('\u{1d622}\u{1d624}\u{1d62e}\u{1d626} '), 'unicode italic');
   await page.locator('.stylebar').getByRole('button', { name: 'Normal' }).click();
+  await btn('Copy in another style').click();
+  await dlg().getByRole('button', { name: /^BIG/ }).click();
+  await copied('ACME INDUSTRIES PVT LTD');
+
+  // Tablet with its own password, and a hidden tablet
+  await newTablet('Net banking', 'p@ss-9981', { pw: 'tab1234' });
+  await newTablet('PAN', 'ABCDE1234F', { hide: true });
+  assert.equal(await page.getByText('ABCDE1234F').count(), 0, 'hidden text not on screen');
+  await tile('PAN').locator('.name').click();
+  await copied('ABCDE1234F');
+  assert.equal(await page.locator('.copybar .txt').textContent(), '••••••••');
+  await btn('Show the copied text').click();
+  assert.equal(await page.locator('.copybar .txt').textContent(), 'ABCDE1234F');
   await shot('1-board');
 
-  // "Copy as…" menu
-  await page.getByRole('button', { name: 'Copy as…' }).click();
-  await shot('2-copy-as');
-  await page.locator('dialog').getByRole('button', { name: /^BIG/ }).click(); await page.waitForTimeout(150);
-  assert.equal((await clip()).text, 'ACME INDUSTRIES PVT LTD');
+  // Password folder inside Company, with a tablet in it
+  await newFolder('Bank', 'fold1234');
+  await page.getByRole('heading', { name: 'Home / Company / Bank' }).waitFor();
+  await newTablet('Account no', '000111222333');
+  // Set, then change, a password on an existing tablet
+  await newTablet('IFSC', 'ACME0001234');
+  await tile('IFSC').getByRole('button', { name: 'Set a password for this tablet' }).click();
+  await fill('New password for this tablet', 'ifsc1234'); await fill('Repeat password', 'ifsc1234');
+  await dlg().getByRole('button', { name: 'Save' }).click();
+  await tile('IFSC').getByRole('button', { name: 'Change or remove tablet password' }).waitFor();
 
-  // Search finds across folders, including by folder name
-  await page.getByLabel('Search all items').fill('account');
+  // Search finds tablets across folders
+  await page.getByLabel('Search all tablets').fill('account');
   await page.getByText('Home / Company / Bank').waitFor();
-  await page.getByLabel('Search all items').fill('');
+  await page.getByLabel('Search all tablets').fill('');
 
   // Settings: clipboard clear + CSV import
-  await page.getByRole('button', { name: 'Settings' }).click();
+  await btn('Settings').click();
   await shot('3-settings');
   await page.getByLabel('Clear clipboard after').selectOption('15');
-  await page.getByLabel('Which items').selectOption('all');
+  await page.getByLabel('Which tablets').selectOption('all');
   const csv = path.join(userData, 'in.csv');
   fs.writeFileSync(csv, 'Folder,Name,Value,Sensitive\r\nCompany / Tax,GST,27ABCDE1234F1Z5,no\r\nCompany,Company name,acme INDUSTRIES pvt ltd,no\r\n,,x,\r\n');
   let chooser = page.waitForEvent('filechooser');
-  await page.getByRole('button', { name: 'Import from Excel or CSV…' }).click();
+  await btn('Import from Excel or CSV…').click();
   await (await chooser).setFiles(csv);
-  await page.getByText('1 new item(s) will be added. 1 already exist and 1 row(s)').waitFor();
-  await page.locator('dialog').getByRole('button', { name: 'Import' }).click();
-  await page.getByRole('button', { name: 'Items', exact: true }).click();
-  await page.getByRole('navigation').getByRole('button', { name: /Tax/ }).click();
-  await page.locator('.tile', { hasText: 'GST' }).waitFor();
+  await page.getByText('1 new tablet(s) will be added. 1 already exist and 1 row(s)').waitFor();
+  await dlg().getByRole('button', { name: 'Import' }).click();
+  await btn('Tablets').click();
+  await nav(/Tax/).click();
+  await tile('GST').waitFor();
 
-  // Excel import (when a sample workbook is supplied)
   if (process.env.XLSX) {
-    await page.getByRole('button', { name: 'Settings' }).click();
+    await btn('Settings').click();
     chooser = page.waitForEvent('filechooser');
-    await page.getByRole('button', { name: 'Import from Excel or CSV…' }).click();
+    await btn('Import from Excel or CSV…').click();
     await (await chooser).setFiles(process.env.XLSX);
-    await page.locator('dialog').getByRole('button', { name: 'Import' }).click();
-    await page.getByRole('button', { name: 'Items', exact: true }).click();
-  await page.getByRole('navigation').getByRole('button', { name: /FromExcel/ }).click();
-    await page.locator('.tile', { hasText: 'Phone' }).waitFor();
+    await dlg().getByRole('button', { name: 'Import' }).click();
+    await btn('Tablets').click();
+    await nav(/FromExcel/).click();
+    await tile('Phone').waitFor();
   }
 
   // Text tools
-  await page.getByRole('button', { name: 'Text tools' }).click();
+  await btn('Text tools').click();
   await page.getByLabel('Text to convert').fill('hello WORLD');
-  await page.locator('.panel').getByRole('button', { name: 'Each Word' }).click(); await page.waitForTimeout(150);
-  assert.equal((await clip()).text, 'Hello World');
+  await page.locator('.panel').getByRole('button', { name: 'Each Word' }).click();
+  await copied('Hello World');
   await shot('4-text-tools');
 
   // Mini window stays on top
-  await page.getByRole('button', { name: 'Mini window' }).click();
-  await page.getByRole('button', { name: 'Full window' }).waitFor();
+  await btn('Mini window').click();
+  await btn('Full window').waitFor();
   assert.equal(await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].isAlwaysOnTop()), true);
-  await page.getByRole('button', { name: 'Items', exact: true }).click();
+  await btn('Tablets').click();
   await page.waitForTimeout(300);
   await shot('5-mini');
-  await page.getByRole('button', { name: 'Full window' }).click();
+  await btn('Full window').click();
   assert.equal(await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].isAlwaysOnTop()), false);
 
-  // Data on disk is encrypted
+  // Nothing readable on disk
   const raw = fs.readFileSync(path.join(userData, 'snipboard-vault.json'), 'utf8');
-  assert.ok(!/acme|000111222333|GST/i.test(raw), 'vault file is encrypted');
+  assert.ok(!/acme|000111222333|GST|Company|p@ss/i.test(raw), 'vault file is encrypted');
 
-  // Restart: data persists, operator is read-only
+  // Restart as Operator: data persists, read-only, password folder and tablets stay locked
   await app.close();
   app = await launch(); page = await app.firstWindow(); watch(page);
   await page.getByLabel('Password').fill('nope');
-  await page.getByRole('button', { name: 'Unlock' }).click();
+  await btn('Unlock').click();
   await page.getByText('Wrong password.').waitFor();
-  await shot('6-login');
   await page.getByLabel('Password').fill('oper123');
-  await page.getByRole('button', { name: 'Unlock' }).click();
+  await btn('Unlock').click();
   await page.getByText('Operator', { exact: true }).waitFor();
-  await page.getByRole('navigation').getByRole('button', { name: /Company/ }).click();
-  await page.locator('.tile', { hasText: 'Company name' }).waitFor();
-  for (const name of ['+ New item', 'Rename', 'Edit', 'Delete', 'Settings', 'Rename folder'])
-    assert.equal(await page.getByRole('button', { name, exact: true }).count(), 0, 'operator has no ' + name);
-  await page.getByRole('navigation').getByRole('button', { name: /Bank/ }).click();
-  await page.locator('.tile .name').click(); await page.waitForTimeout(150);
-  assert.equal((await clip()).text, '000111222333');
-  await shot('7-operator');
+  await nav(/Company/).click();
+  await tile('Company name').waitFor();
+  for (const name of ['New tablet', 'New folder', 'Rename tablet', 'Edit tablet', 'Delete tablet', 'Settings', 'Rename folder', 'Delete folder'])
+    assert.equal(await btn(name).count(), 0, 'operator has no ' + name);
 
-  // Lock button
-  await page.getByRole('button', { name: 'Lock' }).click();
-  await page.getByRole('button', { name: 'Unlock' }).waitFor();
+  // Password tablet: wrong password refused, right one copies
+  await tile('Net banking').getByText('Password needed to copy').waitFor();
+  await tile('Net banking').locator('.name').click();
+  await fill('Tablet password', 'wrong');
+  await dlg().getByRole('button', { name: 'Open' }).click();
+  await dlg().getByText('Wrong password.').waitFor();
+  await fill('Tablet password', 'tab1234');
+  await dlg().getByRole('button', { name: 'Open' }).click();
+  await copied('p@ss-9981');
+
+  // Password folder: contents hidden from search until unlocked
+  await page.getByLabel('Search all tablets').fill('account');
+  await page.getByText('0 results').waitFor();
+  await page.getByLabel('Search all tablets').fill('');
+  await nav(/Bank/).click();
+  await page.getByText('This folder is protected by a password.').waitFor();
+  await shot('6-locked-folder');
+  await btn('Unlock folder').click();
+  await fill('Folder password', 'bad');
+  await dlg().getByRole('button', { name: 'Open folder' }).click();
+  await dlg().getByText('Wrong password.').waitFor();
+  await fill('Folder password', 'fold1234');
+  await dlg().getByRole('button', { name: 'Open folder' }).click();
+  await tile('Account no').locator('.name').click();
+  await copied('000111222333');
+  await tile('IFSC').locator('.name').click();
+  await fill('Tablet password', 'ifsc1234');
+  await dlg().getByRole('button', { name: 'Open' }).click();
+  await copied('ACME0001234');
+  await btn('Lock this folder again').click();
+  await page.getByText('This folder is protected by a password.').waitFor();
+  await btn('Lock the app').click();
+
+  // Admin: remove the folder password, move the folder; tablets stay readable
+  await page.getByLabel('Password').fill('admin123');
+  await btn('Unlock').click();
+  await nav(/Bank/).click();
+  await btn('Unlock folder').click();
+  await fill('Folder password', 'fold1234');
+  await dlg().getByRole('button', { name: 'Open folder' }).click();
+  await btn('Change or remove folder password').click();
+  await dlg().getByLabel('What to do').selectOption('remove');
+  await dlg().getByRole('button', { name: 'Save' }).click();
+  await btn('Set a password for this folder').waitFor();
+  await btn('Move folder').click();
+  await dlg().getByLabel('Move it inside').selectOption({ label: 'Home (top level)' });
+  await dlg().getByRole('button', { name: 'Move' }).click();
+  await page.getByRole('heading', { name: 'Home / Bank' }).waitFor();
+  await btn('Lock the app').click();
+  await page.getByLabel('Password').fill('oper123');
+  await btn('Unlock').click();
+  await nav(/Bank/).click();
+  await tile('Account no').locator('.name').click();
+  await copied('000111222333');
+  await shot('7-operator');
+  await btn('Lock the app').click();
+  await btn('Unlock').waitFor();
 
   // Clipboard is cleared 15s after the copy (setting chosen above)
   await page.waitForTimeout(15500);

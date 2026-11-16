@@ -1,16 +1,22 @@
 import { STYLES, applyStyle } from './textcase.js';
-import { createVault, unlock, saveData, setPassword, isVault } from './vault.js';
+import * as V from './vault.js';
 import { parseCsv, rowsToRecords, toCsv, TEMPLATE } from './io.js';
 import { platform } from './platform.js';
+import { icon } from './icons.js';
 
 const root = document.getElementById('app');
 const toastEl = document.getElementById('toast');
 
 let file = null;      // encrypted vault as stored on disk
-let session = null;   // { role, raw, dk } while unlocked
-let data = null;      // decrypted { folders, items, settings }
+let session = null;   // { role, raw, dk } while the app is unlocked
+let data = null;      // { folders, items, settings } - tablet text inside is still encrypted
+const plain = new Map();       // tablet id -> readable text (only for tablets that are open)
+const folderKeys = new Map();  // folder id -> { raw, key } for password folders opened this session
+const tabKeys = new Map();     // tablet id -> { salt, key } for password tablets opened this session
 const ui = { view: 'board', folderId: null, search: '', style: 'normal', mini: false };
 let contentEl = null;
+let copybarEl = null;
+let lastCopy = null;
 let clipTimer = null;
 let lastActive = Date.now();
 
@@ -37,19 +43,25 @@ function h(tag, attrs, ...kids) {
   return el;
 }
 
+// Icon-only button: the label is the tooltip and the screen-reader name.
+const ib = (name, label, onclick, cls = '') => h('button', { type: 'button', class: 'ib ' + cls, title: label, 'aria-label': label, onclick }, icon(name));
+// Icon + text button.
+const tb = (name, label, onclick, cls = '') => h('button', { type: 'button', class: 'tb ' + cls, onclick }, icon(name), h('span', {}, label));
+
 let toastTimer = null;
 function toast(msg) {
   toastEl.textContent = msg;
   toastEl.classList.add('show');
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => toastEl.classList.remove('show'), 2200);
+  toastTimer = setTimeout(() => toastEl.classList.remove('show'), 2600);
 }
 
-// Modal form. Resolves to an object of values, or null when cancelled.
+// Modal form. Resolves to an object of values, or null when cancelled. validate may be async.
 function form({ title, text, fields = [], ok = 'Save', danger = false, validate }) {
   return new Promise((resolve) => {
     const inputs = {};
     const err = h('div', { class: 'error' });
+    const okBtn = h('button', { type: 'submit', class: danger ? 'primary danger' : 'primary' }, ok);
     const body = fields.map((f) => {
       let input;
       if (f.type === 'textarea') input = h('textarea', { rows: 4, value: f.value || '' });
@@ -61,23 +73,24 @@ function form({ title, text, fields = [], ok = 'Save', danger = false, validate 
       inputs[f.name] = input;
       return f.type === 'checkbox'
         ? h('label', { class: 'check' }, input, f.label)
-        : h('div', {}, h('label', {}, f.label, input));
+        : h('div', {}, h('label', {}, f.label, input), f.hint && h('div', { class: 'hint' }, f.hint));
     });
+    const close = (val) => { dlg.close(); dlg.remove(); resolve(val); };
     const dlg = h('dialog', {},
-      h('form', { method: 'dialog', onsubmit: (e) => {
+      h('form', { method: 'dialog', onsubmit: async (e) => {
         e.preventDefault();
         const vals = {};
         for (const f of fields) vals[f.name] = f.type === 'checkbox' ? inputs[f.name].checked : inputs[f.name].value;
-        const problem = validate && validate(vals);
+        okBtn.disabled = true;
+        const problem = validate && await validate(vals);
+        okBtn.disabled = false;
         if (problem) { err.textContent = problem; return; }
-        dlg.close(); dlg.remove(); resolve(vals);
+        close(vals);
       } },
         h('h3', {}, title),
         text && h('div', { class: 'muted' }, text),
         body, err,
-        h('div', { class: 'btns' },
-          h('button', { type: 'button', onclick: () => { dlg.close(); dlg.remove(); resolve(null); } }, 'Cancel'),
-          h('button', { type: 'submit', class: danger ? 'primary danger' : 'primary' }, ok))));
+        h('div', { class: 'btns' }, h('button', { type: 'button', onclick: () => close(null) }, 'Cancel'), okBtn)));
     dlg.addEventListener('cancel', () => { dlg.remove(); resolve(null); });
     document.body.append(dlg);
     dlg.showModal();
@@ -98,7 +111,7 @@ function pickFile(accept) {
   });
 }
 
-// ---------- data helpers ----------
+// ---------- folders ----------
 
 const kids = (parentId) => data.folders.filter((f) => f.parentId === parentId);
 const folderById = (id) => data.folders.find((f) => f.id === id);
@@ -109,8 +122,22 @@ function pathOf(folderId) {
   return parts;
 }
 
+// A folder can be opened when every password folder on the way to it has been unlocked.
+function accessible(folderId) {
+  for (let f = folderById(folderId); f; f = folderById(f.parentId)) if (f.lock && !folderKeys.has(f.id)) return false;
+  return true;
+}
+
+// Which key protects a tablet stored in this folder: the nearest password folder, else the app itself.
+function gov(folderId) {
+  for (let f = folderById(folderId); f; f = folderById(f.parentId)) if (f.lock) return f.id;
+  return 'vault';
+}
+const keyFor = (by) => (by === 'vault' ? session.dk : folderKeys.get(by) && folderKeys.get(by).key);
+
+// Folder list for the tree. Contents of a locked folder stay hidden.
 function flatFolders(parentId = null, depth = 0, out = []) {
-  for (const f of kids(parentId)) { out.push({ f, depth }); flatFolders(f.id, depth + 1, out); }
+  for (const f of kids(parentId)) { out.push({ f, depth }); if (accessible(f.id)) flatFolders(f.id, depth + 1, out); }
   return out;
 }
 
@@ -119,31 +146,81 @@ function descendants(id, out = new Set([id])) {
   return out;
 }
 
-function ensurePath(parts) {
+const folderOptions = (exclude = new Set()) => [
+  { value: '', label: 'Home (top level)' },
+  ...flatFolders().filter(({ f }) => !exclude.has(f.id) && accessible(f.id))
+    .map(({ f, depth }) => ({ value: f.id, label: '  '.repeat(depth + 1) + f.name })),
+];
+
+// Walks (and creates) a folder path for import. Returns undefined when a locked folder is in the way.
+function resolvePath(parts) {
   let parentId = null;
   for (const name of parts) {
     let f = data.folders.find((x) => x.parentId === parentId && x.name.toLowerCase() === name.toLowerCase());
     if (!f) { f = { id: uid(), name, parentId }; data.folders.push(f); }
+    if (!accessible(f.id)) return undefined;
     parentId = f.id;
   }
   return parentId;
 }
 
-const folderOptions = (exclude = new Set()) => [
-  { value: '', label: 'Home (top level)' },
-  ...flatFolders().filter(({ f }) => !exclude.has(f.id))
-    .map(({ f, depth }) => ({ value: f.id, label: '  '.repeat(depth + 1) + f.name })),
-];
+// ---------- tablets: every tablet's text is encrypted on its own ----------
+
+const selfLocked = (t) => !!t.enc && t.enc.by === 'self';
+const isHidden = (t) => t.sensitive || selfLocked(t);
+const visibleItems = () => data.items.filter((t) => accessible(t.folderId));
+
+async function sealItem(t) {
+  const text = plain.get(t.id);
+  if (text === undefined) throw new Error('locked');
+  if (selfLocked(t)) {
+    const k = tabKeys.get(t.id);
+    if (!k) throw new Error('locked');
+    t.enc = { by: 'self', salt: k.salt, ...(await V.encText(k.key, text)) };
+  } else {
+    const by = gov(t.folderId), key = keyFor(by);
+    if (!key) throw new Error('locked');
+    t.enc = { by, ...(await V.encText(key, text)) };
+  }
+  delete t.value;
+}
+
+// After folders move or passwords change, re-encrypt tablets whose protecting key changed.
+async function rekey() {
+  for (const t of data.items) {
+    if ('value' in t || !t.enc || (!selfLocked(t) && t.enc.by !== gov(t.folderId))) await sealItem(t);
+  }
+}
+
+async function openWith(by, key) {
+  await Promise.all(data.items.filter((t) => t.enc && t.enc.by === by).map(async (t) => plain.set(t.id, await V.decText(key, t.enc))));
+}
 
 async function commit() {
-  file = await saveData(file, session, data);
+  file = await V.saveData(file, session, data);
   await platform.saveVault(file);
 }
 
-// ---------- lock / unlock ----------
+// Run an admin change; if anything fails, put the data back exactly as it was.
+async function change(fn) {
+  const snap = JSON.stringify(data);
+  try {
+    await fn();
+    await rekey();
+    await commit();
+    return true;
+  } catch (e) {
+    data = JSON.parse(snap);
+    toast(e && e.message === 'locked' ? 'Unlock the password folders involved first. Nothing was changed.' : 'Could not save. Nothing was changed.');
+    return false;
+  }
+}
+
+// ---------- lock / unlock the app ----------
 
 function lock(msg) {
-  session = null; data = null; // a pending clipboard-clear timer keeps running on purpose
+  session = null; data = null; lastCopy = null; // a pending clipboard-clear timer keeps running on purpose
+  plain.clear(); folderKeys.clear(); tabKeys.clear();
   document.querySelectorAll('dialog').forEach((d) => d.remove());
   ui.view = 'board'; ui.search = ''; ui.folderId = null;
   render();
@@ -151,10 +228,8 @@ function lock(msg) {
 }
 
 function renderSetup() {
-  const a1 = h('input', { type: 'password', autocomplete: 'new-password' });
-  const a2 = h('input', { type: 'password', autocomplete: 'new-password' });
-  const o1 = h('input', { type: 'password', autocomplete: 'new-password' });
-  const o2 = h('input', { type: 'password', autocomplete: 'new-password' });
+  const mk = (id) => h('input', { type: 'password', autocomplete: 'new-password', id });
+  const a1 = mk('set-a1'), a2 = mk('set-a2'), o1 = mk('set-o1'), o2 = mk('set-o2');
   const err = h('div', { class: 'error' });
   const btn = h('button', { class: 'primary', type: 'submit' }, 'Create and open');
   root.replaceChildren(h('form', { class: 'auth', onsubmit: async (e) => {
@@ -166,8 +241,8 @@ function renderSetup() {
     if (problem) { err.textContent = problem; return; }
     btn.disabled = true; btn.textContent = 'Setting up…';
     const start = { folders: [], items: [], settings: { ...DEFAULT_SETTINGS } };
-    const made = await createVault(a1.value, o1.value, start);
-    await platform.saveVault(made.file);
+    const made = await V.createVault(a1.value, o1.value, start);
+    try { await platform.saveVault(made.file); } catch { toast('This device is not saving data. It will be lost when you close the app.'); }
     file = made.file; session = made.session; data = start;
     render();
   } },
@@ -183,13 +258,13 @@ function renderSetup() {
 }
 
 function renderLogin() {
-  const pw = h('input', { type: 'password', autocomplete: 'current-password' });
+  const pw = h('input', { type: 'password', autocomplete: 'current-password', id: 'login-pw' });
   const err = h('div', { class: 'error' });
   const btn = h('button', { class: 'primary', type: 'submit' }, 'Unlock');
   root.replaceChildren(h('form', { class: 'auth', onsubmit: async (e) => {
     e.preventDefault();
     btn.disabled = true; btn.textContent = 'Checking…'; err.textContent = '';
-    const res = await unlock(file, pw.value);
+    const res = await V.unlock(file, pw.value);
     if (!res) {
       btn.disabled = false; btn.textContent = 'Unlock';
       err.textContent = 'Wrong password.'; pw.select();
@@ -197,6 +272,8 @@ function renderLogin() {
     }
     session = res.session; data = res.data;
     data.settings = { ...DEFAULT_SETTINGS, ...data.settings };
+    for (const t of data.items) if ('value' in t) plain.set(t.id, t.value); // data saved by version 1.0
+    await openWith('vault', session.dk);
     lastActive = Date.now();
     render();
   } },
@@ -207,86 +284,214 @@ function renderLogin() {
   pw.focus();
 }
 
+// ---------- passwords on single tablets and folders ----------
+
+// Makes sure a password tablet is open, asking for its password when needed.
+async function ensureOpen(t) {
+  if (plain.has(t.id)) return true;
+  if (!selfLocked(t)) return false;
+  const vals = await form({ title: 'Password for "' + t.label + '"', ok: 'Open',
+    fields: [{ name: 'pw', label: 'Tablet password', type: 'password' }],
+    validate: async (v) => {
+      try {
+        const k = await V.passwordKey(v.pw, t.enc.salt, file.iter);
+        plain.set(t.id, await V.decText(k.key, t.enc));
+        tabKeys.set(t.id, k);
+        return '';
+      } catch { return 'Wrong password.'; }
+    } });
+  return !!vals;
+}
+
+async function unlockFolder(f) {
+  const vals = await form({ title: 'Password for folder "' + f.name + '"', ok: 'Open folder',
+    fields: [{ name: 'pw', label: 'Folder password', type: 'password' }],
+    validate: async (v) => {
+      const k = await V.openFolderLock(f.lock, v.pw, file.iter);
+      if (!k) return 'Wrong password.';
+      folderKeys.set(f.id, k);
+      await openWith(f.id, k.key);
+      return '';
+    } });
+  if (vals) render();
+}
+
+function closeFolder(f) {
+  for (const t of data.items) if (t.enc && t.enc.by === f.id) plain.delete(t.id);
+  folderKeys.delete(f.id);
+  render();
+  toast('Folder "' + f.name + '" is locked again.');
+}
+
+const pwFields = (what) => [
+  { name: 'p1', label: 'New password for this ' + what, type: 'password' },
+  { name: 'p2', label: 'Repeat password', type: 'password' },
+];
+const pwProblem = (v) => (v.p1.length < 4 ? 'Use at least 4 characters.' : v.p1 !== v.p2 ? 'The two passwords do not match.' : '');
+const PW_WARNING = 'There is no way to recover this password. If it is forgotten, the protected text is lost.';
+
+async function tabletPassword(t) {
+  if (!await ensureOpen(t)) return;
+  const has = selfLocked(t);
+  const vals = await form({ title: (has ? 'Change' : 'Set') + ' password for "' + t.label + '"', text: PW_WARNING, ok: 'Save',
+    fields: [
+      has && { name: 'action', label: 'What to do', type: 'select', value: 'change', options: [{ value: 'change', label: 'Change the password' }, { value: 'remove', label: 'Remove the password' }] },
+      ...pwFields('tablet'),
+    ].filter(Boolean),
+    validate: (v) => (v.action === 'remove' ? '' : pwProblem(v)) });
+  if (!vals) return;
+  const ok = await change(async () => {
+    if (vals.action === 'remove') { tabKeys.delete(t.id); t.enc = null; }
+    else { tabKeys.set(t.id, await V.passwordKey(vals.p1, null, file.iter)); t.enc = { by: 'self' }; }
+    await sealItem(t);
+  });
+  if (ok) { renderContent(); toast(vals.action === 'remove' ? 'Password removed.' : 'Password saved.'); }
+}
+
+async function folderPassword(f) {
+  const has = !!f.lock;
+  const vals = await form({ title: (has ? 'Change' : 'Set') + ' password for folder "' + f.name + '"',
+    text: 'Everything inside the folder is encrypted with this password. ' + PW_WARNING, ok: 'Save',
+    fields: [
+      has && { name: 'action', label: 'What to do', type: 'select', value: 'change', options: [{ value: 'change', label: 'Change the password' }, { value: 'remove', label: 'Remove the password' }] },
+      ...pwFields('folder'),
+    ].filter(Boolean),
+    validate: (v) => (v.action === 'remove' ? '' : pwProblem(v)) });
+  if (!vals) return;
+  const ok = await change(async () => {
+    if (vals.action === 'remove') delete f.lock;
+    else if (has) f.lock = await V.relockFolder(folderKeys.get(f.id).raw, vals.p1, file.iter);
+    else { const k = await V.newFolderLock(vals.p1, file.iter); f.lock = k.lock; folderKeys.set(f.id, { raw: k.raw, key: k.key }); }
+  });
+  if (!ok) { if (!has) folderKeys.delete(f.id); return; }
+  if (vals.action === 'remove') folderKeys.delete(f.id);
+  render();
+  toast(vals.action === 'remove' ? 'Password removed.' : 'Password saved.');
+}
+
 // ---------- copy ----------
 
-async function copyText(text, styleId, name, sensitive, tile) {
+function updateCopybar() {
+  if (!copybarEl) return;
+  const c = lastCopy;
+  if (!c) {
+    copybarEl.replaceChildren(icon('copy'), h('span', { class: 'muted' }, 'Nothing copied yet. Click a tablet to copy its text.'));
+    return;
+  }
+  copybarEl.replaceChildren(
+    icon(c.cleared ? 'x' : 'check'),
+    h('div', { class: 'what' },
+      h('div', { class: 'lbl' }, (c.cleared ? 'Cleared from clipboard' : 'Copied') + (c.name ? ' · ' + c.name : '') + ' · ' + c.style),
+      h('div', { class: 'txt' }, c.hidden && !c.show ? '••••••••' : c.text)),
+    c.hidden && ib('eye', c.show ? 'Hide the copied text' : 'Show the copied text', () => { c.show = !c.show; updateCopybar(); }),
+    !c.cleared && ib('x', 'Clear the clipboard now', async () => { clearTimeout(clipTimer); await platform.clearClipboardIf(c.text); c.cleared = true; updateCopybar(); }));
+}
+
+async function copyText(text, styleId, name, hidden, tile) {
   const c = applyStyle(styleId, text);
   try { await platform.copy(c); } catch { toast('Could not copy. Try again.'); return; }
   const style = STYLES.find((s) => s.id === styleId);
   const { clipClearSec, clipClearScope } = data.settings;
-  const willClear = clipClearSec > 0 && (clipClearScope === 'all' || sensitive);
+  const willClear = clipClearSec > 0 && (clipClearScope === 'all' || hidden);
+  const mine = lastCopy = { name, text: c.text, style: style.label, hidden, show: false, cleared: false };
   clearTimeout(clipTimer);
-  if (willClear) clipTimer = setTimeout(() => platform.clearClipboardIf(c.text), clipClearSec * 1000);
-  toast('Copied' + (name ? ': ' + name : '') + (styleId !== 'normal' ? ' (' + style.label + ')' : '')
-    + (willClear ? ' · clears in ' + clipClearSec + 's' : ''));
+  if (willClear) clipTimer = setTimeout(async () => { await platform.clearClipboardIf(c.text); mine.cleared = true; if (lastCopy === mine) updateCopybar(); }, clipClearSec * 1000);
+  updateCopybar();
+  toast('Copied' + (name ? ': ' + name : '') + (willClear ? ' · clears in ' + clipClearSec + 's' : ''));
   if (tile) { tile.classList.add('copied'); setTimeout(() => tile.classList.remove('copied'), 900); }
 }
 
-function styleMenu(item) {
+async function copyItem(t, styleId, tile) {
+  const wasOpen = plain.has(t.id);
+  if (!await ensureOpen(t)) return;
+  if (!wasOpen) renderContent();
+  await copyText(plain.get(t.id), styleId, t.label, isHidden(t), wasOpen ? tile : null);
+}
+
+function styleMenu(t) {
+  const close = () => { dlg.close(); dlg.remove(); };
   const dlg = h('dialog', { class: 'menu' },
-    h('div', { class: 'muted' }, 'Copy "' + item.label + '" as'),
-    STYLES.map((s) => h('button', { type: 'button', onclick: () => { dlg.close(); dlg.remove(); copyText(item.value, s.id, item.label, item.sensitive); } },
-      s.label, h('small', {}, s.sample))),
-    h('button', { type: 'button', class: 'muted', onclick: () => { dlg.close(); dlg.remove(); } }, 'Cancel'));
+    h('div', { class: 'muted' }, 'Copy "' + t.label + '" as'),
+    STYLES.map((s) => h('button', { type: 'button', onclick: () => { close(); copyItem(t, s.id); } }, s.label, h('small', {}, s.sample))),
+    h('button', { type: 'button', class: 'muted', onclick: close }, 'Cancel'));
   dlg.addEventListener('cancel', () => dlg.remove());
-  dlg.addEventListener('click', (e) => { if (e.target === dlg) { dlg.close(); dlg.remove(); } });
+  dlg.addEventListener('click', (e) => { if (e.target === dlg) close(); });
   document.body.append(dlg);
   dlg.showModal();
 }
 
-// ---------- admin actions ----------
+// ---------- admin actions on tablets ----------
 
-async function editItem(item) {
-  const isNew = !item;
+async function editItem(t) {
+  const isNew = !t;
+  if (t && !await ensureOpen(t)) return;
   const vals = await form({
-    title: isNew ? 'New item' : 'Edit item',
+    title: isNew ? 'New tablet' : 'Edit tablet',
     fields: [
-      { name: 'label', label: 'Name (shown on the button)', value: item ? item.label : '' },
-      { name: 'value', label: 'Text to copy', type: 'textarea', value: item ? item.value : '' },
-      { name: 'folderId', label: 'Folder', type: 'select', value: (item ? item.folderId : ui.folderId) || '', options: folderOptions() },
-      { name: 'sensitive', label: 'Sensitive (hide the text on screen and clear it from the clipboard)', type: 'checkbox', value: item ? item.sensitive : false },
-    ],
-    validate: (v) => (!v.label.trim() ? 'Please enter a name.' : !v.value.trim() ? 'Please enter the text to copy.' : ''),
+      { name: 'label', label: 'Tablet name', value: t ? t.label : '' },
+      { name: 'value', label: 'Text saved in this tablet (this is what gets copied)', type: 'textarea', value: t ? plain.get(t.id) : '' },
+      { name: 'folderId', label: 'Keep it in folder', type: 'select', value: (t ? t.folderId : ui.folderId) || '', options: folderOptions() },
+      { name: 'sensitive', label: 'Hide the text on screen and clear it from the clipboard after copying', type: 'checkbox', value: t ? t.sensitive : false },
+      isNew && { name: 'p1', label: 'Tablet password (optional)', type: 'password', hint: 'Leave empty for no password. With a password, the text can only be copied after typing it.' },
+      isNew && { name: 'p2', label: 'Repeat tablet password', type: 'password' },
+    ].filter(Boolean),
+    validate: (v) => (!v.label.trim() ? 'Please enter a tablet name.' : !v.value.trim() ? 'Please enter the text to save.'
+      : isNew && v.p1 ? pwProblem(v) : ''),
   });
   if (!vals) return;
-  const next = { label: vals.label.trim(), value: vals.value, folderId: vals.folderId || null, sensitive: vals.sensitive };
-  if (isNew) data.items.push({ id: uid(), ...next }); else Object.assign(item, next);
-  await commit(); renderContent();
+  const ok = await change(async () => {
+    const item = t || { id: uid() };
+    if (isNew) data.items.push(item);
+    Object.assign(item, { label: vals.label.trim(), folderId: vals.folderId || null, sensitive: vals.sensitive });
+    plain.set(item.id, vals.value);
+    if (isNew && vals.p1) { tabKeys.set(item.id, await V.passwordKey(vals.p1, null, file.iter)); item.enc = { by: 'self' }; }
+    await sealItem(item);
+  });
+  if (ok) { renderContent(); toast(isNew ? 'Tablet saved.' : 'Changes saved.'); }
 }
 
-async function renameItem(item) {
-  const vals = await form({ title: 'Rename item', ok: 'Rename',
-    fields: [{ name: 'label', label: 'New name', value: item.label }],
+async function renameItem(t) {
+  const vals = await form({ title: 'Rename tablet', ok: 'Rename',
+    fields: [{ name: 'label', label: 'New name', value: t.label }],
     validate: (v) => (!v.label.trim() ? 'Please enter a name.' : '') });
   if (!vals) return;
-  item.label = vals.label.trim();
-  await commit(); renderContent();
+  if (await change(() => { t.label = vals.label.trim(); })) renderContent();
 }
 
-async function deleteItem(item) {
-  if (!await confirmBox('Delete item?', '"' + item.label + '" will be removed permanently.', 'Delete', true)) return;
-  data.items = data.items.filter((x) => x !== item);
-  await commit(); renderContent();
+async function deleteItem(t) {
+  if (!await confirmBox('Delete tablet?', '"' + t.label + '" will be removed permanently.', 'Delete', true)) return;
+  if (await change(() => { data.items = data.items.filter((x) => x.id !== t.id); })) renderContent();
 }
 
-async function moveItem(item, dir) {
-  const same = data.items.filter((x) => x.folderId === item.folderId);
-  const other = same[same.indexOf(item) + dir];
+async function moveItem(t, dir) {
+  const same = data.items.filter((x) => x.folderId === t.folderId);
+  const other = same[same.indexOf(t) + dir];
   if (!other) return;
-  const a = data.items.indexOf(item), b = data.items.indexOf(other);
-  [data.items[a], data.items[b]] = [data.items[b], data.items[a]];
-  await commit(); renderContent();
+  const ok = await change(() => {
+    const a = data.items.findIndex((x) => x.id === t.id), b = data.items.findIndex((x) => x.id === other.id);
+    [data.items[a], data.items[b]] = [data.items[b], data.items[a]];
+  });
+  if (ok) renderContent();
 }
+
+// ---------- admin actions on folders ----------
 
 async function newFolder(parentId) {
-  const vals = await form({ title: parentId ? 'New subfolder in "' + folderById(parentId).name + '"' : 'New folder', ok: 'Create',
-    fields: [{ name: 'name', label: 'Folder name', value: '' }],
-    validate: (v) => (!v.name.trim() ? 'Please enter a name.' : '') });
+  const vals = await form({ title: 'New folder', ok: 'Create folder',
+    fields: [
+      { name: 'name', label: 'Folder name', value: '' },
+      { name: 'parentId', label: 'Create it inside', type: 'select', value: parentId || '', options: folderOptions() },
+      { name: 'p1', label: 'Folder password (optional)', type: 'password', hint: 'Leave empty for no password. With a password, the folder must be unlocked before its tablets can be seen.' },
+      { name: 'p2', label: 'Repeat folder password', type: 'password' },
+    ],
+    validate: (v) => (!v.name.trim() ? 'Please enter a folder name.' : v.p1 ? pwProblem(v) : '') });
   if (!vals) return;
-  const f = { id: uid(), name: vals.name.trim(), parentId };
-  data.folders.push(f);
-  ui.folderId = f.id;
-  await commit(); render();
+  const f = { id: uid(), name: vals.name.trim(), parentId: vals.parentId || null };
+  const ok = await change(async () => {
+    if (vals.p1) { const k = await V.newFolderLock(vals.p1, file.iter); f.lock = k.lock; folderKeys.set(f.id, { raw: k.raw, key: k.key }); }
+    data.folders.push(f);
+  });
+  if (ok) { ui.folderId = f.id; render(); toast('Folder created.'); }
 }
 
 async function renameFolder(f) {
@@ -294,45 +499,46 @@ async function renameFolder(f) {
     fields: [{ name: 'name', label: 'New name', value: f.name }],
     validate: (v) => (!v.name.trim() ? 'Please enter a name.' : '') });
   if (!vals) return;
-  f.name = vals.name.trim();
-  await commit(); render();
+  if (await change(() => { folderById(f.id).name = vals.name.trim(); })) render();
 }
 
 async function moveFolder(f) {
-  const vals = await form({ title: 'Move "' + f.name + '"', ok: 'Move',
-    fields: [{ name: 'parentId', label: 'Move inside', type: 'select', value: f.parentId || '', options: folderOptions(descendants(f.id)) }] });
+  const vals = await form({ title: 'Move folder "' + f.name + '"', ok: 'Move',
+    fields: [{ name: 'parentId', label: 'Move it inside', type: 'select', value: f.parentId || '', options: folderOptions(descendants(f.id)) }] });
   if (!vals) return;
-  f.parentId = vals.parentId || null;
-  await commit(); render();
+  if (await change(() => { folderById(f.id).parentId = vals.parentId || null; })) render();
 }
 
 async function deleteFolder(f) {
   const ids = descendants(f.id);
   const n = data.items.filter((x) => ids.has(x.folderId)).length;
-  const text = 'This also deletes ' + (ids.size - 1) + ' subfolder(s) and ' + n + ' item(s) inside it. This cannot be undone.';
+  const text = 'This also deletes ' + (ids.size - 1) + ' folder(s) and ' + n + ' tablet(s) inside it. This cannot be undone.';
   if (!await confirmBox('Delete folder "' + f.name + '"?', text, 'Delete everything', true)) return;
-  data.folders = data.folders.filter((x) => !ids.has(x.id));
-  data.items = data.items.filter((x) => !ids.has(x.folderId));
-  ui.folderId = f.parentId;
-  await commit(); render();
+  const ok = await change(() => {
+    data.folders = data.folders.filter((x) => !ids.has(x.id));
+    data.items = data.items.filter((x) => !ids.has(x.folderId));
+  });
+  if (ok) { ui.folderId = f.parentId; render(); }
 }
 
 // ---------- board ----------
 
-function tile(item, showPath) {
+function tile(t, showPath) {
   const admin = isAdmin();
+  const open = plain.has(t.id);
   const el = h('div', { class: 'tile' },
-    h('button', { class: 'hit', title: 'Click to copy', onclick: () => copyText(item.value, ui.style, item.label, item.sensitive, el) },
-      showPath && h('span', { class: 'path' }, ['Home', ...pathOf(item.folderId)].join(' / ')),
-      h('span', { class: 'name' }, item.label),
-      h('span', { class: 'value' }, item.sensitive ? '••••••••' : item.value)),
+    h('button', { class: 'hit', title: 'Click to copy', onclick: () => copyItem(t, ui.style, el) },
+      showPath && h('span', { class: 'path' }, ['Home', ...pathOf(t.folderId)].join(' / ')),
+      h('span', { class: 'name' }, selfLocked(t) && icon(open ? 'unlock' : 'lock'), t.label),
+      h('span', { class: 'value' }, !open ? 'Password needed to copy' : isHidden(t) ? '••••••••' : plain.get(t.id))),
     h('div', { class: 'acts' },
-      h('button', { class: 'ghost', onclick: () => styleMenu(item) }, 'Copy as…'),
-      admin && h('button', { class: 'ghost', onclick: () => renameItem(item) }, 'Rename'),
-      admin && h('button', { class: 'ghost', onclick: () => editItem(item) }, 'Edit'),
-      admin && !showPath && h('button', { class: 'ghost', title: 'Move up', 'aria-label': 'Move up', onclick: () => moveItem(item, -1) }, '↑'),
-      admin && !showPath && h('button', { class: 'ghost', title: 'Move down', 'aria-label': 'Move down', onclick: () => moveItem(item, 1) }, '↓'),
-      admin && h('button', { class: 'ghost danger', onclick: () => deleteItem(item) }, 'Delete')));
+      ib('type', 'Copy in another style', () => styleMenu(t)),
+      admin && ib('tag', 'Rename tablet', () => renameItem(t)),
+      admin && ib('pencil', 'Edit tablet', () => editItem(t)),
+      admin && ib('key', selfLocked(t) ? 'Change or remove tablet password' : 'Set a password for this tablet', () => tabletPassword(t)),
+      admin && !showPath && ib('up', 'Move up', () => moveItem(t, -1)),
+      admin && !showPath && ib('down', 'Move down', () => moveItem(t, 1)),
+      admin && ib('trash', 'Delete tablet', () => deleteItem(t), 'danger')));
   return el;
 }
 
@@ -341,40 +547,58 @@ function renderBoard() {
   if (ui.folderId && !folderById(ui.folderId)) ui.folderId = null;
   const q = ui.search.trim().toLowerCase();
   if (q) {
-    const hits = data.items.filter((i) => i.label.toLowerCase().includes(q)
-      || (!i.sensitive && i.value.toLowerCase().includes(q))
-      || pathOf(i.folderId).join(' / ').toLowerCase().includes(q));
+    const hits = visibleItems().filter((t) => t.label.toLowerCase().includes(q)
+      || (!isHidden(t) && (plain.get(t.id) || '').toLowerCase().includes(q))
+      || pathOf(t.folderId).join(' / ').toLowerCase().includes(q));
     return [
       h('div', { class: 'folderbar' }, h('h2', {}, hits.length + ' result' + (hits.length === 1 ? '' : 's') + ' for "' + ui.search.trim() + '"')),
-      hits.length ? h('div', { class: 'grid' }, hits.map((i) => tile(i, true))) : h('div', { class: 'empty' }, 'Nothing matches. Try a shorter word.'),
+      hits.length ? h('div', { class: 'grid' }, hits.map((t) => tile(t, true))) : h('div', { class: 'empty' }, 'Nothing matches. Try a shorter word.'),
     ];
   }
   const f = folderById(ui.folderId);
-  const items = data.items.filter((i) => i.folderId === ui.folderId);
-  const subs = kids(ui.folderId);
-  const sel = h('select', { 'aria-label': 'Folder', onchange: () => { ui.folderId = sel.value || null; render(); } },
-    folderOptions().map((o) => h('option', { value: o.value }, o.label)));
+  const sel = h('select', { 'aria-label': 'Folder', id: 'folder-select', onchange: () => { ui.folderId = sel.value || null; render(); } },
+    [{ value: '', label: 'Home' }, ...flatFolders().map(({ f: x, depth }) => ({ value: x.id, label: '  '.repeat(depth + 1) + (x.lock ? '🔒 ' : '') + x.name }))]
+      .map((o) => h('option', { value: o.value }, o.label)));
   sel.value = ui.folderId || '';
+  const title = h('h2', {}, ['Home', ...pathOf(ui.folderId)].join(' / '));
+
+  if (f && !accessible(f.id)) {
+    return [
+      h('div', { class: 'foldersel' }, sel),
+      h('div', { class: 'folderbar' }, title),
+      h('div', { class: 'lockpane' }, icon('lock'),
+        h('div', {}, 'This folder is protected by a password.'),
+        tb('unlock', 'Unlock folder', () => unlockFolder(f), 'primary'),
+        admin && tb('trash', 'Delete folder', () => deleteFolder(f), 'danger')),
+    ];
+  }
+
+  const items = data.items.filter((t) => t.folderId === ui.folderId);
+  const subs = kids(ui.folderId);
   return [
     h('div', { class: 'foldersel' }, sel),
     h('div', { class: 'folderbar' },
-      h('h2', {}, ['Home', ...pathOf(ui.folderId)].join(' / ')),
+      title,
       h('span', { class: 'spacer' }),
-      admin && h('button', { class: 'primary', onclick: () => editItem(null) }, '+ New item'),
-      admin && h('button', { onclick: () => newFolder(ui.folderId) }, f ? '+ Subfolder' : '+ Folder'),
-      admin && f && h('button', { onclick: () => renameFolder(f) }, 'Rename folder'),
-      admin && f && h('button', { onclick: () => moveFolder(f) }, 'Move folder'),
-      admin && f && h('button', { class: 'danger', onclick: () => deleteFolder(f) }, 'Delete folder')),
-    subs.length ? h('div', { class: 'subs' }, subs.map((s) => h('button', { onclick: () => { ui.folderId = s.id; render(); } }, '📁 ' + s.name))) : null,
-    items.length ? h('div', { class: 'grid' }, items.map((i) => tile(i, false)))
-      : h('div', { class: 'empty' }, admin ? 'No items here yet. Use "+ New item" to add the first one.' : 'No items in this folder.'),
+      admin && tb('plus', 'New tablet', () => editItem(null), 'primary'),
+      admin && tb('folderPlus', 'New folder', () => newFolder(ui.folderId)),
+      admin && f && ib('tag', 'Rename folder', () => renameFolder(f)),
+      admin && f && ib('move', 'Move folder', () => moveFolder(f)),
+      admin && f && ib('key', f.lock ? 'Change or remove folder password' : 'Set a password for this folder', () => folderPassword(f)),
+      f && f.lock && ib('lock', 'Lock this folder again', () => closeFolder(f)),
+      admin && f && ib('trash', 'Delete folder', () => deleteFolder(f), 'danger')),
+    subs.length ? h('div', { class: 'subs' }, subs.map((s) => tb(s.lock && !folderKeys.has(s.id) ? 'lock' : 'folder', s.name, () => { ui.folderId = s.id; render(); }))) : null,
+    items.length ? h('div', { class: 'grid' }, items.map((t) => tile(t, false)))
+      : h('div', { class: 'empty' },
+        h('div', {}, admin ? 'No tablets here yet. A tablet holds one piece of text that you can copy with one click.' : 'No tablets in this folder.'),
+        admin && tb('plus', 'Create a tablet', () => editItem(null), 'primary')),
   ];
 }
 
 // ---------- text tools ----------
 
 function renderTools() {
-  const input = h('textarea', { rows: 6, placeholder: 'Type or paste any text here…', 'aria-label': 'Text to convert' });
+  const input = h('textarea', { rows: 6, id: 'tools-input', placeholder: 'Type or paste any text here…', 'aria-label': 'Text to convert' });
   return [h('div', { class: 'panel' },
     h('h3', {}, 'Text tools'),
     h('div', { class: 'muted' }, 'Type or paste text, then press a button to copy it in that style.'),
@@ -387,7 +611,7 @@ function renderTools() {
         if (map[ui.style]) input.value = applyStyle(ui.style, input.value).text;
         else toast('Pick BIG, small, First capital or Each Word above first.');
       } }, 'Change the text in the box to the selected copy style'),
-      h('button', { onclick: () => { input.value = ''; input.focus(); } }, 'Clear')))];
+      tb('x', 'Clear', () => { input.value = ''; input.focus(); })))];
 }
 
 // ---------- settings (admin) ----------
@@ -398,15 +622,16 @@ async function changePassword(role) {
     fields: [{ name: 'p1', label: 'New ' + name + ' password', type: 'password' }, { name: 'p2', label: 'Repeat it', type: 'password' }],
     validate: (v) => (v.p1.length < 6 ? 'Use at least 6 characters.' : v.p1 !== v.p2 ? 'The two passwords do not match.' : '') });
   if (!vals) return;
-  const clash = await unlock(file, vals.p1);
+  const clash = await V.unlock(file, vals.p1);
   if (clash && clash.role !== role) { toast('That password is already used by the other role. Nothing changed.'); return; }
-  file = await setPassword(file, session, role, vals.p1);
+  file = await V.setPassword(file, session, role, vals.p1);
   await platform.saveVault(file);
   toast(name + ' password changed.');
 }
 
 const today = () => new Date().toISOString().slice(0, 10);
-const allRecords = () => data.items.map((i) => ({ path: pathOf(i.folderId), label: i.label, value: i.value, sensitive: !!i.sensitive }));
+const openRecords = () => visibleItems().filter((t) => plain.has(t.id))
+  .map((t) => ({ path: pathOf(t.folderId), label: t.label, value: plain.get(t.id), sensitive: !!t.sensitive }));
 
 async function importSheet() {
   const f = await pickFile('.xlsx,.csv');
@@ -421,15 +646,27 @@ async function importSheet() {
   } catch { toast('Could not read that file. Use .xlsx or .csv.'); return; }
   const { records, skipped } = rowsToRecords(rows);
   if (!records.length) { toast('No rows found. Columns must be: Folder, Name, Value, Sensitive.'); return; }
-  const have = new Set(allRecords().map((r) => JSON.stringify([r.path.map((p) => p.toLowerCase()), r.label, r.value])));
-  const fresh = records.filter((r) => !have.has(JSON.stringify([r.path.map((p) => p.toLowerCase()), r.label, r.value])));
-  const text = fresh.length + ' new item(s) will be added. ' + (records.length - fresh.length) + ' already exist and '
-    + skipped + ' row(s) have no name or value, so they are skipped.';
+  const sig = (r) => JSON.stringify([r.path.map((p) => p.toLowerCase()), r.label, r.value]);
+  const have = new Set(openRecords().map(sig));
+  const fresh = records.filter((r) => !have.has(sig(r)));
   if (!fresh.length) { toast('Nothing new to import.'); return; }
+  const text = fresh.length + ' new tablet(s) will be added. ' + (records.length - fresh.length) + ' already exist and '
+    + skipped + ' row(s) have no name or value, so they are skipped.';
   if (!await confirmBox('Import from ' + f.name + '?', text, 'Import')) return;
-  for (const r of fresh) data.items.push({ id: uid(), folderId: ensurePath(r.path), label: r.label, value: r.value, sensitive: r.sensitive });
-  await commit(); render();
-  toast('Imported ' + fresh.length + ' item(s).');
+  let blocked = 0;
+  const ok = await change(async () => {
+    for (const r of fresh) {
+      const folderId = resolvePath(r.path);
+      if (folderId === undefined) { blocked++; continue; }
+      const t = { id: uid(), folderId, label: r.label, sensitive: r.sensitive };
+      plain.set(t.id, r.value);
+      data.items.push(t);
+      await sealItem(t);
+    }
+  });
+  if (!ok) return;
+  render();
+  toast('Imported ' + (fresh.length - blocked) + ' tablet(s).' + (blocked ? ' ' + blocked + ' skipped: their folder is locked.' : ''));
 }
 
 async function restoreBackup() {
@@ -437,7 +674,7 @@ async function restoreBackup() {
   if (!f) return;
   let obj;
   try { obj = JSON.parse(await f.text()); } catch { obj = null; }
-  if (!isVault(obj)) { toast('That is not a SnipBoard backup file.'); return; }
+  if (!V.isVault(obj)) { toast('That is not a SnipBoard backup file.'); return; }
   const text = 'Everything on this device is replaced by the backup. You will then log in with the passwords that were in use when the backup was made.';
   if (!await confirmBox('Restore backup?', text, 'Replace my data', true)) return;
   await platform.saveVault(obj);
@@ -447,43 +684,47 @@ async function restoreBackup() {
 
 function renderSettings() {
   const s = data.settings;
-  const save = async () => { await commit(); toast('Saved.'); };
-  const lockSel = h('select', { 'aria-label': 'Auto-lock', onchange: () => { s.autoLockMin = +lockSel.value; save(); } },
-    [[1, '1 minute'], [5, '5 minutes'], [15, '15 minutes'], [30, '30 minutes'], [0, 'Never']].map(([v, l]) => h('option', { value: v }, l)));
-  lockSel.value = s.autoLockMin;
-  const clipSel = h('select', { 'aria-label': 'Clear clipboard after', onchange: () => { s.clipClearSec = +clipSel.value; save(); } },
-    [[15, '15 seconds'], [30, '30 seconds'], [60, '1 minute'], [0, 'Never']].map(([v, l]) => h('option', { value: v }, l)));
-  clipSel.value = s.clipClearSec;
-  const scopeSel = h('select', { 'aria-label': 'Which items', onchange: () => { s.clipClearScope = scopeSel.value; save(); } },
-    h('option', { value: 'sensitive' }, 'Sensitive items only'), h('option', { value: 'all' }, 'Everything copied'));
-  scopeSel.value = s.clipClearScope;
+  const save = async () => { if (await change(() => {})) toast('Saved.'); };
+  const pick = (id, label, value, options, set) => {
+    const el = h('select', { id, 'aria-label': label, onchange: () => { set(el.value); save(); } }, options.map(([v, l]) => h('option', { value: v }, l)));
+    el.value = value;
+    return el;
+  };
   return [
     h('div', { class: 'panel' },
-      h('h3', {}, 'Passwords'),
-      h('div', { class: 'muted' }, 'Admin can change everything. Operators can only view and copy.'),
+      h('h3', {}, 'App passwords'),
+      h('div', { class: 'muted' }, 'Admin can change everything. Operators can only view and copy. Passwords for single tablets and folders are set with the key button on each one.'),
       h('div', { class: 'row' },
-        h('button', { onclick: () => changePassword('admin') }, 'Change Admin password'),
-        h('button', { onclick: () => changePassword('operator') }, 'Change Operator password'))),
+        tb('key', 'Change Admin password', () => changePassword('admin')),
+        tb('key', 'Change Operator password', () => changePassword('operator')))),
     h('div', { class: 'panel' },
       h('h3', {}, 'Auto-lock and clipboard'),
-      h('div', { class: 'row' }, 'Lock the app when nobody uses it for', lockSel),
-      h('div', { class: 'row' }, 'Clear copied text from the clipboard after', clipSel, 'for', scopeSel)),
+      h('div', { class: 'row' }, 'Lock the app when nobody uses it for',
+        pick('set-lock', 'Auto-lock', s.autoLockMin, [[1, '1 minute'], [5, '5 minutes'], [15, '15 minutes'], [30, '30 minutes'], [0, 'Never']], (v) => { s.autoLockMin = +v; })),
+      h('div', { class: 'row' }, 'Clear copied text from the clipboard after',
+        pick('set-clip', 'Clear clipboard after', s.clipClearSec, [[15, '15 seconds'], [30, '30 seconds'], [60, '1 minute'], [0, 'Never']], (v) => { s.clipClearSec = +v; }),
+        'for',
+        pick('set-scope', 'Which tablets', s.clipClearScope, [['sensitive', 'Hidden and password tablets only'], ['all', 'Everything copied']], (v) => { s.clipClearScope = v; }))),
     h('div', { class: 'panel' },
       h('h3', {}, 'Backup'),
       h('div', { class: 'muted' }, 'The backup file is encrypted. It opens only with the passwords in use today.'),
       h('div', { class: 'row' },
-        h('button', { onclick: async () => { if (await platform.saveFile('snipboard-backup-' + today() + '.snipbackup', JSON.stringify(file), 'application/json')) toast('Backup saved.'); } }, 'Save backup file'),
-        h('button', { class: 'danger', onclick: restoreBackup }, 'Restore from backup…'))),
+        tb('save', 'Save backup file', async () => { if (await platform.saveFile('snipboard-backup-' + today() + '.snipbackup', JSON.stringify(file), 'application/json')) toast('Backup saved.'); }),
+        tb('upload', 'Restore from backup…', restoreBackup, 'danger'))),
     h('div', { class: 'panel' },
       h('h3', {}, 'Excel / CSV'),
       h('div', { class: 'muted' }, 'Sheet columns: Folder, Name, Value, Sensitive. Folder can be a path such as "Company / Bank".'),
       h('div', { class: 'row' },
-        h('button', { onclick: importSheet }, 'Import from Excel or CSV…'),
-        h('button', { onclick: () => platform.saveFile('snipboard-template.csv', toCsv(TEMPLATE), 'text/csv') }, 'Download sample sheet'),
-        h('button', { onclick: async () => {
-          if (!await confirmBox('Export all items?', 'The CSV file is NOT encrypted. Anyone who opens it can read every item, including sensitive ones.', 'Export')) return;
-          platform.saveFile('snipboard-items-' + today() + '.csv', toCsv(allRecords()), 'text/csv');
-        } }, 'Export all items to CSV'))),
+        tb('upload', 'Import from Excel or CSV…', importSheet),
+        tb('save', 'Download sample sheet', () => platform.saveFile('snipboard-template.csv', toCsv(TEMPLATE), 'text/csv')),
+        tb('save', 'Export tablets to CSV', async () => {
+          const recs = openRecords();
+          const left = data.items.length - recs.length;
+          const text = 'The CSV file is NOT encrypted. Anyone who opens it can read every tablet in it.'
+            + (left ? ' ' + left + ' tablet(s) that are still locked by their own or a folder password are left out.' : '');
+          if (!await confirmBox('Export ' + recs.length + ' tablet(s)?', text, 'Export')) return;
+          platform.saveFile('snipboard-tablets-' + today() + '.csv', toCsv(recs), 'text/csv');
+        }))),
   ];
 }
 
@@ -496,38 +737,43 @@ function renderContent() {
 }
 
 function sideTree() {
-  const node = (id, name, depth) => h('button', { class: 'node', 'aria-current': ui.folderId === id && !ui.search ? 'true' : null,
-    'data-depth': depth, onclick: () => { ui.folderId = id; ui.search = ''; ui.view = 'board'; render(); } }, '   '.repeat(depth) + (depth ? '📁 ' : '🏠 ') + name);
-  return [node(null, 'Home', 0), ...flatFolders().map(({ f, depth }) => node(f.id, f.name, depth + 1))];
+  const node = (id, name, depth, ic) => h('button', { class: 'node d' + Math.min(depth, 6), 'aria-current': ui.folderId === id && !ui.search ? 'true' : null,
+    onclick: () => { ui.folderId = id; ui.search = ''; ui.view = 'board'; render(); } }, icon(ic), h('span', {}, name));
+  return [node(null, 'Home', 0, 'home'),
+    ...flatFolders().map(({ f, depth }) => node(f.id, f.name, depth + 1, f.lock ? (folderKeys.has(f.id) ? 'unlock' : 'lock') : 'folder'))];
 }
 
 function renderMain() {
   const admin = isAdmin();
-  const search = h('input', { class: 'search', type: 'search', placeholder: 'Search all items…', 'aria-label': 'Search all items', value: ui.search,
+  const search = h('input', { class: 'search', type: 'search', id: 'search', placeholder: 'Search all tablets…', 'aria-label': 'Search all tablets', value: ui.search,
     oninput: () => { ui.search = search.value; ui.view = 'board'; renderContent(); } });
-  const tab = (id, label) => h('button', { 'aria-pressed': String(ui.view === id), onclick: () => { ui.view = id; ui.search = ''; render(); } }, label);
+  const tab = (id, ic, label) => h('button', { class: 'tb', title: label, 'aria-label': label, 'aria-pressed': String(ui.view === id), onclick: () => { ui.view = id; ui.search = ''; render(); } }, icon(ic), h('span', {}, label));
   contentEl = h('div', { class: 'main' });
+  copybarEl = h('div', { class: 'copybar', 'aria-live': 'polite' });
   root.replaceChildren(...[
     h('div', { class: 'top' },
       h('span', { class: 'brand' }, 'SnipBoard'),
       h('span', { class: 'role' }, admin ? 'Admin' : 'Operator'),
       search,
-      h('div', { class: 'tabs' }, tab('board', 'Items'), tab('tools', 'Text tools'), admin && tab('settings', 'Settings')),
-      platform.canMini && h('button', { 'aria-pressed': String(ui.mini), title: 'Small window that stays on top of other programs',
-        onclick: async () => { ui.mini = !ui.mini; await platform.setMini(ui.mini); render(); } }, ui.mini ? 'Full window' : 'Mini window'),
-      h('button', { onclick: () => lock() }, 'Lock')),
+      h('div', { class: 'tabs' }, tab('board', 'grid', 'Tablets'), tab('tools', 'type', 'Text tools'), admin && tab('settings', 'sliders', 'Settings')),
+      platform.canMini && h('button', { class: 'ib', 'aria-pressed': String(ui.mini), 'aria-label': ui.mini ? 'Full window' : 'Mini window',
+        title: ui.mini ? 'Back to the full window' : 'Mini window that stays on top of other programs',
+        onclick: async () => { ui.mini = !ui.mini; await platform.setMini(ui.mini); render(); } }, icon('pip')),
+      ib('lock', 'Lock the app', () => lock())),
     ui.view !== 'settings' && h('div', { class: 'stylebar' },
       h('span', { class: 'muted' }, 'Copy style:'),
       STYLES.map((s) => h('button', { class: 'chip', title: s.sample, 'aria-pressed': String(ui.style === s.id),
         onclick: () => { ui.style = s.id; render(); } }, s.label))),
     h('div', { class: 'body' },
       ui.view === 'board' ? h('nav', { class: 'side', 'aria-label': 'Folders' }, sideTree()) : null,
-      contentEl)].filter(Boolean));
+      contentEl),
+    ui.view !== 'settings' && copybarEl].filter(Boolean));
   renderContent();
+  updateCopybar();
 }
 
 function render() {
-  contentEl = null;
+  contentEl = null; copybarEl = null;
   if (!file) renderSetup();
   else if (!session) renderLogin();
   else renderMain();
@@ -548,6 +794,6 @@ setInterval(() => {
 
 (async () => {
   const stored = await platform.loadVault();
-  file = isVault(stored) ? stored : null;
+  file = V.isVault(stored) ? stored : null;
   render();
 })();

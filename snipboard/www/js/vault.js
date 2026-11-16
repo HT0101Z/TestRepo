@@ -82,3 +82,31 @@ export async function saveData(file, session, data) {
 export async function setPassword(file, session, role, newPw) {
   return { ...file, [role]: await wrap(session.raw, newPw, file.iter) };
 }
+
+// ---------- per-tablet and per-folder protection ----------
+
+// Encrypt / decrypt one piece of text with an AES-GCM key.
+export async function encText(key, text) {
+  const iv = rand(12);
+  return { iv: b64(iv), ct: b64(await subtle.encrypt({ name: 'AES-GCM', iv }, key, enc.encode(text))) };
+}
+export async function decText(key, box) {
+  return dec.decode(await subtle.decrypt({ name: 'AES-GCM', iv: unb64(box.iv) }, key, unb64(box.ct)));
+}
+
+// Key made directly from a password (used by a tablet that has its own password).
+export async function passwordKey(password, salt, iter) {
+  const s = salt ? unb64(salt) : rand(16);
+  return { salt: b64(s), key: await kek(password, s, iter) };
+}
+
+// A folder password protects a random folder key; tablets in the folder are encrypted with that key.
+export async function newFolderLock(password, iter) {
+  const raw = rand(32);
+  return { lock: await wrap(raw, password, iter), raw, key: await importDK(raw) };
+}
+export async function openFolderLock(lock, password, iter) {
+  const raw = await unwrap(lock, password, iter);
+  return raw ? { raw, key: await importDK(raw) } : null;
+}
+export const relockFolder = (raw, password, iter) => wrap(raw, password, iter);
